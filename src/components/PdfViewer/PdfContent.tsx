@@ -62,6 +62,14 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
   setNeedsRedraw,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const cacheCanvasRef = useRef<HTMLCanvasElement | null>(null); // 缓存canvas
+  const lastRenderStateRef = useRef<{
+    scale: number;
+    devicePixelRatio: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  
   const { 
     getPagePosterState, 
     updatePagePosterState, 
@@ -97,6 +105,44 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     });
   }, [imageCache, setImageCache]);
 
+  // 创建或获取缓存canvas
+  const getCacheCanvas = useCallback(() => {
+    if (!cacheCanvasRef.current) {
+      cacheCanvasRef.current = document.createElement('canvas');
+    }
+    return cacheCanvasRef.current;
+  }, []);
+
+  // 检查是否需要重新渲染（而不是使用缓存）
+  const needsFullRender = useCallback(() => {
+    const currentState = {
+      scale: viewState.scale,
+      devicePixelRatio,
+      width: pageWidth,
+      height: pageHeight,
+    };
+
+    if (!lastRenderStateRef.current) {
+      lastRenderStateRef.current = currentState;
+      return true;
+    }
+
+    const lastState = lastRenderStateRef.current;
+    const stateChanged = (
+      lastState.scale !== currentState.scale ||
+      lastState.devicePixelRatio !== currentState.devicePixelRatio ||
+      lastState.width !== currentState.width ||
+      lastState.height !== currentState.height
+    );
+
+    if (stateChanged) {
+      lastRenderStateRef.current = currentState;
+      return true;
+    }
+
+    return false;
+  }, [viewState.scale, devicePixelRatio, pageWidth, pageHeight]);
+
   // 绘制单页内容
   const drawPage = useCallback(() => {
     const canvas = canvasRef.current;
@@ -116,20 +162,38 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
       canvas.style.height = `${pageHeight + 4}px`;
     }
 
+    // 如果在滚动且有缓存，直接使用缓存
+    const cacheCanvas = getCacheCanvas();
+    if (isScrolling && cacheCanvas.width > 0 && !needsFullRender()) {
+      ctx.clearRect(0, 0, actualWidth, actualHeight);
+      ctx.drawImage(cacheCanvas, 0, 0);
+      return;
+    }
+
+    // 设置缓存canvas尺寸
+    if (cacheCanvas.width !== actualWidth || cacheCanvas.height !== actualHeight) {
+      cacheCanvas.width = actualWidth;
+      cacheCanvas.height = actualHeight;
+    }
+    
+    const cacheCtx = cacheCanvas.getContext('2d');
+    if (!cacheCtx) return;
+
     // 清除画布
     ctx.clearRect(0, 0, actualWidth, actualHeight);
+    cacheCtx.clearRect(0, 0, actualWidth, actualHeight);
 
     // 1. 绘制页面背景和边框
-    ctx.save();
+    cacheCtx.save();
     
     // 页面背景
-    ctx.fillStyle = 'white';
-    ctx.fillRect(0, 0, actualWidth, actualHeight);
+    cacheCtx.fillStyle = 'white';
+    cacheCtx.fillRect(0, 0, actualWidth, actualHeight);
     
     // 页面边框
-    ctx.strokeStyle = '#e5e5e5';
-    ctx.lineWidth = 2 * devicePixelRatio;
-    ctx.strokeRect(
+    cacheCtx.strokeStyle = 'transparent';
+    cacheCtx.lineWidth = 2 * devicePixelRatio;
+    cacheCtx.strokeRect(
       devicePixelRatio,
       devicePixelRatio,
       pageWidth * devicePixelRatio,
@@ -137,21 +201,21 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     );
     
     // 阴影效果
-    ctx.fillStyle = 'rgba(0,0,0,0.1)';
-    ctx.fillRect(
+    cacheCtx.fillStyle = '';
+    cacheCtx.fillRect(
       3 * devicePixelRatio,
       (pageHeight + 3) * devicePixelRatio,
       pageWidth * devicePixelRatio,
       devicePixelRatio
     );
-    ctx.fillRect(
+    cacheCtx.fillRect(
       (pageWidth + 3) * devicePixelRatio,
       3 * devicePixelRatio,
       devicePixelRatio,
       pageHeight * devicePixelRatio
     );
     
-    ctx.restore();
+    cacheCtx.restore();
 
     // 2. 绘制海报图
     const posterKey = generatePosterKey(pdfMetadata.id, pageIndex);
@@ -159,17 +223,17 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     const posterUrl = getPagePosterUrl(pdfMetadata.id, pageIndex, devicePixelRatio);
 
     if (imageCache[posterKey]) {
-      ctx.save();
-      ctx.globalAlpha = posterState.loaded ? 1 : 0.3;
+      cacheCtx.save();
+      cacheCtx.globalAlpha = posterState.loaded ? 1 : 0.3;
       
-      ctx.drawImage(
+      cacheCtx.drawImage(
         imageCache[posterKey],
         2 * devicePixelRatio,
         2 * devicePixelRatio,
         pageWidth * devicePixelRatio,
         pageHeight * devicePixelRatio
       );
-      ctx.restore();
+      cacheCtx.restore();
     } else if (!posterState.loading) {
       updatePagePosterState(posterKey, { loading: true });
       loadImage(posterUrl, posterKey)
@@ -209,17 +273,17 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
         const tileUrl = getTileUrl(tileInfo, devicePixelRatio, true);
 
         if (imageCache[key] && tileState.loaded) {
-          ctx.save();
-          ctx.imageSmoothingEnabled = false;
+          cacheCtx.save();
+          cacheCtx.imageSmoothingEnabled = false;
           
-          ctx.drawImage(
+          cacheCtx.drawImage(
             imageCache[key],
             (tileX + 2) * devicePixelRatio,
             (tileY + 2) * devicePixelRatio,
             renderWidth * devicePixelRatio,
             renderHeight * devicePixelRatio
           );
-          ctx.restore();
+          cacheCtx.restore();
         } else if (!tileState.loading && !imageCache[key] && !isScrolling) {
           updateTileState(key, { loading: true });
           loadImage(tileUrl, key)
@@ -236,8 +300,8 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     }
 
     // 4. 绘制页码
-    ctx.save();
-    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    cacheCtx.save();
+    cacheCtx.fillStyle = 'rgba(0,0,0,0.7)';
     const pageNumX = (pageWidth - 56) * devicePixelRatio;
     const pageNumY = (pageHeight + 8) * devicePixelRatio;
     const pageNumWidth = 52 * devicePixelRatio;
@@ -245,31 +309,34 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     
     // 页码背景
     const radius = 4 * devicePixelRatio;
-    ctx.beginPath();
-    ctx.moveTo(pageNumX + radius, pageNumY);
-    ctx.lineTo(pageNumX + pageNumWidth - radius, pageNumY);
-    ctx.quadraticCurveTo(pageNumX + pageNumWidth, pageNumY, pageNumX + pageNumWidth, pageNumY + radius);
-    ctx.lineTo(pageNumX + pageNumWidth, pageNumY + pageNumHeight - radius);
-    ctx.quadraticCurveTo(pageNumX + pageNumWidth, pageNumY + pageNumHeight, pageNumX + pageNumWidth - radius, pageNumY + pageNumHeight);
-    ctx.lineTo(pageNumX + radius, pageNumY + pageNumHeight);
-    ctx.quadraticCurveTo(pageNumX, pageNumY + pageNumHeight, pageNumX, pageNumY + pageNumHeight - radius);
-    ctx.lineTo(pageNumX, pageNumY + radius);
-    ctx.quadraticCurveTo(pageNumX, pageNumY, pageNumX + radius, pageNumY);
-    ctx.closePath();
-    ctx.fill();
+    cacheCtx.beginPath();
+    cacheCtx.moveTo(pageNumX + radius, pageNumY);
+    cacheCtx.lineTo(pageNumX + pageNumWidth - radius, pageNumY);
+    cacheCtx.quadraticCurveTo(pageNumX + pageNumWidth, pageNumY, pageNumX + pageNumWidth, pageNumY + radius);
+    cacheCtx.lineTo(pageNumX + pageNumWidth, pageNumY + pageNumHeight - radius);
+    cacheCtx.quadraticCurveTo(pageNumX + pageNumWidth, pageNumY + pageNumHeight, pageNumX + pageNumWidth - radius, pageNumY + pageNumHeight);
+    cacheCtx.lineTo(pageNumX + radius, pageNumY + pageNumHeight);
+    cacheCtx.quadraticCurveTo(pageNumX, pageNumY + pageNumHeight, pageNumX, pageNumY + pageNumHeight - radius);
+    cacheCtx.lineTo(pageNumX, pageNumY + radius);
+    cacheCtx.quadraticCurveTo(pageNumX, pageNumY, pageNumX + radius, pageNumY);
+    cacheCtx.closePath();
+    cacheCtx.fill();
     
     // 页码文字
-    ctx.fillStyle = 'white';
-    ctx.font = `${12 * devicePixelRatio}px Arial`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(
+    cacheCtx.fillStyle = 'white';
+    cacheCtx.font = `${12 * devicePixelRatio}px Arial`;
+    cacheCtx.textAlign = 'center';
+    cacheCtx.textBaseline = 'middle';
+    cacheCtx.fillText(
       `${pageIndex + 1}`,
       pageNumX + pageNumWidth / 2,
       pageNumY + pageNumHeight / 2
     );
     
-    ctx.restore();
+    cacheCtx.restore();
+
+    // 将缓存内容复制到主canvas
+    ctx.drawImage(cacheCanvas, 0, 0);
   }, [
     pageWidth,
     pageHeight,
@@ -283,7 +350,9 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     updatePagePosterState,
     getTileState,
     updateTileState,
-    loadImage
+    loadImage,
+    getCacheCanvas,
+    needsFullRender
   ]);
 
   // 当需要重绘时执行
