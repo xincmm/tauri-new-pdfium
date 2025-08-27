@@ -56,7 +56,6 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
   pdfMetadata,
   containerWidth,
   viewState,
-  lastScrollY,
   isScrolling,
   devicePixelRatio,
   imageCache,
@@ -395,13 +394,13 @@ export const PdfContent: React.FC<PdfContentProps> = ({
 }) => {
   // 图像缓存
   const [imageCache, setImageCache] = useState<ImageCache>({});
-  const [needsRedraw, setNeedsRedraw] = useState(false);
+  const [_, setNeedsRedraw] = useState(false);
   const [selectedText, setSelectedText] = useState<string>('');
   
   const { crossPageSelection, setCrossPageSelection } = pdfState;
 
   // 跨页选区处理函数
-  const handleGlobalMouseDown = useCallback((pageIndex: number, charIndex: number) => {
+  const handleGlobalMouseDown = useCallback(() => {
     // 先不创建跨页选区，等到鼠标移动时再创建
     // 这样可以避免单纯点击时显示选区
   }, []);
@@ -531,7 +530,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
       }
     };
 
-    const handleDocumentMouseUp = (e: MouseEvent) => {
+    const handleDocumentMouseUp = () => {
       if (crossPageSelection?.isSelecting) {
         handleGlobalMouseUp();
       }

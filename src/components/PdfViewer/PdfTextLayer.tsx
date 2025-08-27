@@ -51,7 +51,6 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
   pageWidth,
   pageHeight,
   scale,
-  pageWidthPt,
   pageHeightPt,
   onTextSelect,
   // 跨页选区相关

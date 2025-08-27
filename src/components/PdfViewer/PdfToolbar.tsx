@@ -20,7 +20,6 @@ export const PdfToolbar: React.FC<PdfToolbarProps> = ({
   currentVisiblePage,
   viewState,
   setViewState,
-  isScrolling,
   pdfState,
   onOpenPdf,
   onResetView,
