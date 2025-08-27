@@ -18,6 +18,8 @@ const BASE_DPI: f32 = 144.0;
 const WEBP_QUALITY: u8 = 80;
 // 最大DPI限制，防止内存过度使用
 const MAX_DPI: f32 = 600.0;
+// 最小DPI限制，确保低分辨率瓦片仍有合理质量
+const MIN_DPI: f32 = 36.0;
 
 struct PdfData {
     bytes: Vec<u8>,
@@ -179,8 +181,8 @@ async fn ensure_page_image(data: &PdfData, page: u32, scale_x100: u32) -> Result
         let (w_pt, h_pt) = page_dims;
         let scale = scale_x100 as f32 / 100.0;
         
-        // 限制最大DPI以防止内存过度使用
-        let effective_dpi = (BASE_DPI * scale).min(MAX_DPI);
+        // 限制DPI范围以确保合理的性能和质量平衡
+        let effective_dpi = (BASE_DPI * scale).max(MIN_DPI).min(MAX_DPI);
         let w_px = ((w_pt / 72.0) * effective_dpi).ceil() as u32;
         let h_px = ((h_pt / 72.0) * effective_dpi).ceil() as u32;
 
@@ -297,7 +299,7 @@ async fn render_tile_directly(data: &PdfData, key: &TileKey, request_start: Inst
         let scale = key_clone.scale_x100 as f32 / 100.0;
         
         // 计算实际的瓦片大小和位置，考虑DPI缩放
-        let effective_dpi = (BASE_DPI * scale).min(MAX_DPI);
+        let effective_dpi = (BASE_DPI * scale).max(MIN_DPI).min(MAX_DPI);
         let dpi_scale = effective_dpi / BASE_DPI;
         let actual_tile_size = (TILE_SIZE as f32 * dpi_scale).round() as u32;
         let x = key_clone.tx * actual_tile_size;

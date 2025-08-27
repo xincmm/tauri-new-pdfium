@@ -33,9 +33,20 @@ const TILE_SIZE = 512;
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5.0;
 const PAGE_MARGIN = 20; // 页面间距
+const SCROLL_DEBOUNCE_MS = 150; // 滚动停止后的延迟时间
+const LOW_RES_SCALE_FACTOR = 0.25; // 低分辨率瓦片的缩放因子
+const HIGH_RES_LOAD_DELAY = 300; // 高分辨率瓦片加载延迟
+
+interface TileState {
+  lowResLoaded: boolean;
+  highResLoaded: boolean;
+  isLoadingHighRes: boolean;
+}
 
 function App() {
   const containerRef = useRef<HTMLDivElement>(null);
+  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const highResTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [pdfMetadata, setPdfMetadata] = useState<PdfMetadata | null>(null);
   const [viewState, setViewState] = useState<ViewState>({
     scale: 1.0,
@@ -43,6 +54,8 @@ function App() {
   });
   const [loading, setLoading] = useState(false);
   const [currentVisiblePage, setCurrentVisiblePage] = useState(0);
+  const [isScrolling, setIsScrolling] = useState(false); // 新增：滚动状态
+  const [tileStates, setTileStates] = useState<Map<string, TileState>>(new Map()); // 瓦片状态管理
   // 获取设备像素比，用于高DPI屏幕支持
   const [devicePixelRatio] = useState(() => window.devicePixelRatio || 1);
   // 性能监控状态
@@ -116,6 +129,8 @@ function App() {
         setPdfMetadata(metadata);
         setViewState({ scale: 1.0, scrollY: 0 });
         setCurrentVisiblePage(0);
+        // 清理旧的瓦片状态
+        setTileStates(new Map());
         console.log('PDF loaded:', metadata);
       }
     } catch (error) {
@@ -127,11 +142,31 @@ function App() {
   };
 
   // 获取 tile URL，考虑设备像素比
-  const getTileUrl = (tileInfo: TileInfo): string => {
+  const getTileUrl = (tileInfo: TileInfo, isHighRes: boolean = true): string => {
     const { id, page, scale, tx, ty } = tileInfo;
     // 根据设备像素比调整请求的缩放级别，确保高DPI屏幕的清晰度
-    const adjustedScale = scale * devicePixelRatio;
+    const baseScale = isHighRes ? scale * devicePixelRatio : scale * devicePixelRatio * LOW_RES_SCALE_FACTOR;
+    const adjustedScale = Math.max(0.1, baseScale); // 确保最小缩放不为0
     return `tiles://localhost/${id}/${page}/${adjustedScale}/${tx}/${ty}.webp`;
+  };
+
+  // 获取瓦片状态
+  const getTileState = (key: string): TileState => {
+    return tileStates.get(key) || {
+      lowResLoaded: false,
+      highResLoaded: false,
+      isLoadingHighRes: false
+    };
+  };
+
+  // 更新瓦片状态
+  const updateTileState = (key: string, updates: Partial<TileState>) => {
+    setTileStates(prev => {
+      const newMap = new Map(prev);
+      const currentState = getTileState(key);
+      newMap.set(key, { ...currentState, ...updates });
+      return newMap;
+    });
   };
 
   // 渲染所有可见页面的瓦片
@@ -173,50 +208,78 @@ function App() {
           const renderHeight = Math.min(TILE_SIZE, pageHeight - ty * TILE_SIZE);
 
           const key = `${tileInfo.id}_${tileInfo.page}_${tileInfo.scale}_${tileInfo.tx}_${tileInfo.ty}`;
+          const tileState = getTileState(key);
 
+          // 渲染低分辨率瓦片（总是先加载）
           tiles.push(
             <img
-              key={key}
-              src={getTileUrl(tileInfo)}
-              alt={`Page ${pageIndex + 1} Tile ${tx},${ty}`}
+              key={`${key}_low`}
+              src={getTileUrl(tileInfo, false)}
+              alt={`Page ${pageIndex + 1} Tile ${tx},${ty} Low Res`}
               style={{
                 position: 'absolute',
                 left: `${tileX}px`,
                 top: `${tileY}px`,
                 width: `${renderWidth}px`,
                 height: `${renderHeight}px`,
-                imageRendering: 'pixelated',
+                imageRendering: 'auto', // 低分辨率使用平滑缩放
                 pointerEvents: 'none',
+                opacity: tileState.highResLoaded ? 0 : 1,
+                transition: 'opacity 0.3s ease',
+                zIndex: 1,
               }}
               onLoad={() => {
-                setPerformanceStats(prev => ({
-                  ...prev,
-                  loadingTiles: Math.max(0, prev.loadingTiles - 1)
-                }));
+                updateTileState(key, { lowResLoaded: true });
+                
+                // 低分辨率加载完成后，如果不在滚动状态，延迟加载高分辨率
+                if (!isScrolling && !tileState.isLoadingHighRes && !tileState.highResLoaded) {
+                  updateTileState(key, { isLoadingHighRes: true });
+                }
               }}
-              onLoadStart={() => {
-                setPerformanceStats(prev => ({
-                  ...prev,
-                  loadingTiles: prev.loadingTiles + 1,
-                  totalTiles: prev.totalTiles + 1
-                }));
-              }}
-              onError={(e) => {
-                console.warn('Failed to load tile:', tileInfo);
-                e.currentTarget.style.display = 'none';
-                setPerformanceStats(prev => ({
-                  ...prev,
-                  loadingTiles: Math.max(0, prev.loadingTiles - 1)
-                }));
+              onError={() => {
+                console.warn('Failed to load low-res tile:', tileInfo);
               }}
             />
           );
+
+          // 渲染高分辨率瓦片（条件加载）
+          if (tileState.lowResLoaded && (tileState.isLoadingHighRes || tileState.highResLoaded)) {
+            tiles.push(
+              <img
+                key={`${key}_high`}
+                src={getTileUrl(tileInfo, true)}
+                alt={`Page ${pageIndex + 1} Tile ${tx},${ty} High Res`}
+                style={{
+                  position: 'absolute',
+                  left: `${tileX}px`,
+                  top: `${tileY}px`,
+                  width: `${renderWidth}px`,
+                  height: `${renderHeight}px`,
+                  imageRendering: 'pixelated',
+                  pointerEvents: 'none',
+                  opacity: tileState.highResLoaded ? 1 : 0,
+                  transition: 'opacity 0.3s ease',
+                  zIndex: 2,
+                }}
+                onLoad={() => {
+                  updateTileState(key, { 
+                    highResLoaded: true, 
+                    isLoadingHighRes: false 
+                  });
+                }}
+                onError={() => {
+                  console.warn('Failed to load high-res tile:', tileInfo);
+                  updateTileState(key, { isLoadingHighRes: false });
+                }}
+              />
+            );
+          }
         }
       }
     });
 
     return tiles;
-  }, [pdfMetadata, viewState, devicePixelRatio, getVisiblePages]);
+  }, [pdfMetadata, viewState, devicePixelRatio, getVisiblePages, isScrolling, tileStates]);
 
   // 渲染页面边框和页码
   const renderPageBorders = useCallback(() => {
@@ -297,6 +360,46 @@ function App() {
     const scrollTop = containerRef.current.scrollTop;
     const containerHeight = containerRef.current.clientHeight;
     
+    // 设置滚动状态为 true
+    setIsScrolling(true);
+    
+    // 清除之前的定时器
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
+    }
+    if (highResTimeoutRef.current) {
+      clearTimeout(highResTimeoutRef.current);
+    }
+    
+    // 设置新的定时器，在滚动停止后恢复渲染
+    scrollTimeoutRef.current = setTimeout(() => {
+      setIsScrolling(false);
+      
+      // 滚动停止后，延迟加载当前可见区域的高分辨率瓦片
+      highResTimeoutRef.current = setTimeout(() => {
+        const visiblePages = getVisiblePages();
+        visiblePages.forEach(pageLayout => {
+          const { pageIndex, width: pageWidth, height: pageHeight } = pageLayout;
+          
+          const startTileX = 0;
+          const endTileX = Math.ceil(pageWidth / TILE_SIZE);
+          const startTileY = 0;
+          const endTileY = Math.ceil(pageHeight / TILE_SIZE);
+
+          for (let tx = startTileX; tx < endTileX; tx++) {
+            for (let ty = startTileY; ty < endTileY; ty++) {
+              const key = `${pdfMetadata.id}_${pageIndex}_${Math.round(viewState.scale * 100) / 100}_${tx}_${ty}`;
+              const tileState = getTileState(key);
+              
+              if (tileState.lowResLoaded && !tileState.isLoadingHighRes && !tileState.highResLoaded) {
+                updateTileState(key, { isLoadingHighRes: true });
+              }
+            }
+          }
+        });
+      }, HIGH_RES_LOAD_DELAY);
+    }, SCROLL_DEBOUNCE_MS);
+    
     setViewState(prev => ({
       ...prev,
       scrollY: scrollTop,
@@ -311,7 +414,7 @@ function App() {
     if (currentPage !== -1 && currentPage !== currentVisiblePage) {
       setCurrentVisiblePage(currentPage);
     }
-  }, [pdfMetadata, calculatePageLayouts, currentVisiblePage]);
+  }, [pdfMetadata, calculatePageLayouts, currentVisiblePage, viewState.scale, getVisiblePages, getTileState, updateTileState]);
 
   // 跳转到指定页面
   const goToPage = (pageIndex: number) => {
@@ -397,6 +500,18 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [pdfMetadata, currentVisiblePage]);
 
+  // 清理定时器
+  useEffect(() => {
+    return () => {
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+      }
+      if (highResTimeoutRef.current) {
+        clearTimeout(highResTimeoutRef.current);
+      }
+    };
+  }, []);
+
   return (
     <div className="app">
       <div className="toolbar">
@@ -432,6 +547,18 @@ function App() {
             <div className="help-text">
               <small>
                 滚轮滚动翻页 | Ctrl/Cmd + 滚轮缩放 | Ctrl/Cmd + 0 重置
+              </small>
+            </div>
+            
+            {isScrolling && (
+              <div className="scroll-indicator">
+                <small style={{ color: '#666' }}>滚动中... (显示低分辨率预览)</small>
+              </div>
+            )}
+            
+            <div className="tile-stats">
+              <small style={{ color: '#888' }}>
+                瓦片状态: {Array.from(tileStates.values()).filter(s => s.lowResLoaded).length} 低清 / {Array.from(tileStates.values()).filter(s => s.highResLoaded).length} 高清
               </small>
             </div>
           </>
