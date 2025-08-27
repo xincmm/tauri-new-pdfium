@@ -298,6 +298,26 @@ async fn render_tile_directly(data: &PdfData, key: &TileKey, request_start: Inst
         let (w, h) = page_img_arc.dimensions();
         let scale = key_clone.scale_x100 as f32 / 100.0;
         
+        // 检查是否为整页请求（特殊标记：tx=-1, ty=-1）
+        if key_clone.tx == u32::MAX && key_clone.ty == u32::MAX {
+            // 返回整页图像，不进行裁剪
+            println!("📄 整页图像请求 - 页面:{}x{}, 缩放:{:.2}", w, h, scale);
+            
+            // 直接编码整页图像为WebP
+            let rgba_img = page_img_arc.to_rgba8();
+            let raw = rgba_img.into_raw();
+            let webp = webp::Encoder::from_rgba(&raw, w, h).encode(WEBP_QUALITY as f32);
+            let t3 = Instant::now();
+            
+            println!(
+                "⏱️  整页图像性能 - page={} scale={:.2}: 整页渲染={:?} 编码={:?} 总计={:?}",
+                key_clone.page, scale,
+                t1_inner - request_start_clone, t3 - t1_inner, t3 - request_start_clone
+            );
+            
+            return Ok(Arc::new(webp.to_vec()));
+        }
+        
         // 计算实际的瓦片大小和位置，考虑DPI缩放
         let effective_dpi = (BASE_DPI * scale).max(MIN_DPI).min(MAX_DPI);
         let dpi_scale = effective_dpi / BASE_DPI;
