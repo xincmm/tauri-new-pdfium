@@ -19,35 +19,86 @@ interface TileInfo {
 
 interface ViewState {
   scale: number;
-  offsetX: number;
-  offsetY: number;
-  currentPage: number;
+  scrollY: number;
+}
+
+interface PageLayout {
+  pageIndex: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 const TILE_SIZE = 512;
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5.0;
+const PAGE_MARGIN = 20; // 页面间距
 
 function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [pdfMetadata, setPdfMetadata] = useState<PdfMetadata | null>(null);
   const [viewState, setViewState] = useState<ViewState>({
     scale: 1.0,
-    offsetX: 0,
-    offsetY: 0,
-    currentPage: 0,
+    scrollY: 0,
   });
-  const [isDragging, setIsDragging] = useState(false);
-  const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
   const [loading, setLoading] = useState(false);
+  const [currentVisiblePage, setCurrentVisiblePage] = useState(0);
   // 获取设备像素比，用于高DPI屏幕支持
   const [devicePixelRatio] = useState(() => window.devicePixelRatio || 1);
   // 性能监控状态
-  const [performanceStats, setPerformanceStats] = useState({ 
+  const [ , setPerformanceStats] = useState({ 
     loadingTiles: 0, 
     totalTiles: 0,
     avgLoadTime: 0 
   });
+
+  // 计算页面布局
+  const calculatePageLayouts = useCallback((): PageLayout[] => {
+    if (!pdfMetadata) return [];
+    
+    const baseDpi = 144.0;
+    const layouts: PageLayout[] = [];
+    let currentY = PAGE_MARGIN;
+    
+    for (let i = 0; i < pdfMetadata.total_pages; i++) {
+      const [pageWidth, pageHeight] = pdfMetadata.page_dims[i];
+      const screenPageWidth = ((pageWidth / 72.0) * baseDpi * viewState.scale);
+      const screenPageHeight = ((pageHeight / 72.0) * baseDpi * viewState.scale);
+      
+      layouts.push({
+        pageIndex: i,
+        y: currentY,
+        width: screenPageWidth,
+        height: screenPageHeight,
+      });
+      
+      currentY += screenPageHeight + PAGE_MARGIN;
+    }
+    
+    return layouts;
+  }, [pdfMetadata, viewState.scale]);
+
+  // 计算总文档高度
+  const getTotalDocumentHeight = useCallback((): number => {
+    const layouts = calculatePageLayouts();
+    if (layouts.length === 0) return 0;
+    const lastLayout = layouts[layouts.length - 1];
+    return lastLayout.y + lastLayout.height + PAGE_MARGIN;
+  }, [calculatePageLayouts]);
+
+  // 获取当前可见的页面
+  const getVisiblePages = useCallback((): PageLayout[] => {
+    if (!containerRef.current) return [];
+    
+    const layouts = calculatePageLayouts();
+    const containerHeight = containerRef.current.clientHeight;
+    const viewportTop = viewState.scrollY;
+    const viewportBottom = viewState.scrollY + containerHeight;
+    
+    return layouts.filter(layout => 
+      layout.y < viewportBottom && layout.y + layout.height > viewportTop
+    );
+  }, [calculatePageLayouts, viewState.scrollY]);
 
   // 打开 PDF 文件
   const openPdfFile = async () => {
@@ -63,7 +114,8 @@ function App() {
       if (selected) {
         const metadata = await invoke<PdfMetadata>('open_pdf', { path: selected });
         setPdfMetadata(metadata);
-        setViewState(prev => ({ ...prev, currentPage: 0 }));
+        setViewState({ scale: 1.0, scrollY: 0 });
+        setCurrentVisiblePage(0);
         console.log('PDF loaded:', metadata);
       }
     } catch (error) {
@@ -82,166 +134,214 @@ function App() {
     return `tiles://localhost/${id}/${page}/${adjustedScale}/${tx}/${ty}.webp`;
   };
 
-  // 渲染当前页面的瓦片
+  // 渲染所有可见页面的瓦片
   const renderTiles = useCallback(() => {
     if (!pdfMetadata || !containerRef.current) return [];
 
-    const { scale, offsetX, offsetY, currentPage } = viewState;
-    const [pageWidth, pageHeight] = pdfMetadata.page_dims[currentPage];
-    
-    // 计算页面在屏幕上的尺寸
-    const baseDpi = 144.0;
-    const screenPageWidth = ((pageWidth / 72.0) * baseDpi * scale);
-    const screenPageHeight = ((pageHeight / 72.0) * baseDpi * scale);
-
-    // 获取容器尺寸
+    const visiblePages = getVisiblePages();
     const containerWidth = containerRef.current.clientWidth;
-    const containerHeight = containerRef.current.clientHeight;
-
-    // 计算需要渲染的 tile 范围
-    const startTileX = Math.max(0, Math.floor(-offsetX / TILE_SIZE));
-    const endTileX = Math.ceil((containerWidth - offsetX) / TILE_SIZE);
-    const startTileY = Math.max(0, Math.floor(-offsetY / TILE_SIZE));
-    const endTileY = Math.ceil((containerHeight - offsetY) / TILE_SIZE);
-
-    const maxTileX = Math.ceil(screenPageWidth / TILE_SIZE);
-    const maxTileY = Math.ceil(screenPageHeight / TILE_SIZE);
-
     const tiles: React.ReactElement[] = [];
 
-    for (let tx = startTileX; tx < Math.min(endTileX, maxTileX); tx++) {
-      for (let ty = startTileY; ty < Math.min(endTileY, maxTileY); ty++) {
-        const tileInfo: TileInfo = {
-          id: pdfMetadata.id,
-          page: currentPage,
-          scale: Math.round(scale * 100) / 100, // 保留两位小数
-          tx,
-          ty,
-        };
+    visiblePages.forEach(pageLayout => {
+      const { pageIndex, y: pageY, width: pageWidth, height: pageHeight } = pageLayout;
+      
+      // 计算页面居中位置
+      const pageX = Math.max(0, (containerWidth - pageWidth) / 2);
+      
+      // 计算需要渲染的 tile 范围
+      const startTileX = 0;
+      const endTileX = Math.ceil(pageWidth / TILE_SIZE);
+      const startTileY = 0;
+      const endTileY = Math.ceil(pageHeight / TILE_SIZE);
 
-        // 计算 tile 的位置和尺寸
-        const x = offsetX + tx * TILE_SIZE;
-        const y = offsetY + ty * TILE_SIZE;
-        
-        // 计算实际渲染尺寸（处理边缘 tile）
-        const renderWidth = Math.min(TILE_SIZE, screenPageWidth - tx * TILE_SIZE);
-        const renderHeight = Math.min(TILE_SIZE, screenPageHeight - ty * TILE_SIZE);
+      for (let tx = startTileX; tx < endTileX; tx++) {
+        for (let ty = startTileY; ty < endTileY; ty++) {
+          const tileInfo: TileInfo = {
+            id: pdfMetadata.id,
+            page: pageIndex,
+            scale: Math.round(viewState.scale * 100) / 100,
+            tx,
+            ty,
+          };
 
-        const key = `${tileInfo.id}_${tileInfo.page}_${tileInfo.scale}_${tileInfo.tx}_${tileInfo.ty}`;
+          // 计算 tile 的绝对位置
+          const tileX = pageX + tx * TILE_SIZE;
+          const tileY = pageY + ty * TILE_SIZE;
+          
+          // 计算实际渲染尺寸（处理边缘 tile）
+          const renderWidth = Math.min(TILE_SIZE, pageWidth - tx * TILE_SIZE);
+          const renderHeight = Math.min(TILE_SIZE, pageHeight - ty * TILE_SIZE);
 
-        tiles.push(
-          <img
-            key={key}
-            src={getTileUrl(tileInfo)}
-            alt={`Tile ${tx},${ty}`}
-            style={{
-              position: 'absolute',
-              left: `${x}px`,
-              top: `${y}px`,
-              width: `${renderWidth}px`,
-              height: `${renderHeight}px`,
-              imageRendering: 'pixelated', // 保持清晰度
-              pointerEvents: 'none', // 不响应鼠标事件
-            }}
-            onLoad={() => {
-              // 更新性能统计
-              setPerformanceStats(prev => ({
-                ...prev,
-                loadingTiles: Math.max(0, prev.loadingTiles - 1)
-              }));
-            }}
-            onLoadStart={() => {
-              // 开始加载时更新统计
-              setPerformanceStats(prev => ({
-                ...prev,
-                loadingTiles: prev.loadingTiles + 1,
-                totalTiles: prev.totalTiles + 1
-              }));
-            }}
-            onError={(e) => {
-              console.warn('Failed to load tile:', tileInfo);
-              // 隐藏加载失败的瓦片
-              e.currentTarget.style.display = 'none';
-              setPerformanceStats(prev => ({
-                ...prev,
-                loadingTiles: Math.max(0, prev.loadingTiles - 1)
-              }));
-            }}
-          />
-        );
+          const key = `${tileInfo.id}_${tileInfo.page}_${tileInfo.scale}_${tileInfo.tx}_${tileInfo.ty}`;
+
+          tiles.push(
+            <img
+              key={key}
+              src={getTileUrl(tileInfo)}
+              alt={`Page ${pageIndex + 1} Tile ${tx},${ty}`}
+              style={{
+                position: 'absolute',
+                left: `${tileX}px`,
+                top: `${tileY}px`,
+                width: `${renderWidth}px`,
+                height: `${renderHeight}px`,
+                imageRendering: 'pixelated',
+                pointerEvents: 'none',
+              }}
+              onLoad={() => {
+                setPerformanceStats(prev => ({
+                  ...prev,
+                  loadingTiles: Math.max(0, prev.loadingTiles - 1)
+                }));
+              }}
+              onLoadStart={() => {
+                setPerformanceStats(prev => ({
+                  ...prev,
+                  loadingTiles: prev.loadingTiles + 1,
+                  totalTiles: prev.totalTiles + 1
+                }));
+              }}
+              onError={(e) => {
+                console.warn('Failed to load tile:', tileInfo);
+                e.currentTarget.style.display = 'none';
+                setPerformanceStats(prev => ({
+                  ...prev,
+                  loadingTiles: Math.max(0, prev.loadingTiles - 1)
+                }));
+              }}
+            />
+          );
+        }
       }
-    }
+    });
 
     return tiles;
-  }, [pdfMetadata, viewState, devicePixelRatio]);
+  }, [pdfMetadata, viewState, devicePixelRatio, getVisiblePages]);
 
-  // 处理鼠标滚轮缩放
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
+  // 渲染页面边框和页码
+  const renderPageBorders = useCallback(() => {
+    if (!pdfMetadata || !containerRef.current) return [];
     
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, viewState.scale * delta));
+    const visiblePages = getVisiblePages();
+    const containerWidth = containerRef.current.clientWidth;
+    const borders: React.ReactElement[] = [];
+
+    visiblePages.forEach(pageLayout => {
+      const { pageIndex, y: pageY, width: pageWidth, height: pageHeight } = pageLayout;
+      const pageX = Math.max(0, (containerWidth - pageWidth) / 2);
+      
+      borders.push(
+        <div
+          key={`border-${pageIndex}`}
+          style={{
+            position: 'absolute',
+            left: `${pageX - 2}px`,
+            top: `${pageY - 2}px`,
+            width: `${pageWidth + 4}px`,
+            height: `${pageHeight + 4}px`,
+            border: '2px solid #e5e5e5',
+            backgroundColor: 'white',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+            pointerEvents: 'none',
+            zIndex: -1,
+          }}
+        />,
+        <div
+          key={`page-number-${pageIndex}`}
+          style={{
+            position: 'absolute',
+            left: `${pageX + pageWidth - 60}px`,
+            top: `${pageY + pageHeight + 8}px`,
+            padding: '4px 8px',
+            backgroundColor: 'rgba(0,0,0,0.7)',
+            color: 'white',
+            fontSize: '12px',
+            borderRadius: '4px',
+            pointerEvents: 'none',
+          }}
+        >
+          {pageIndex + 1}
+        </div>
+      );
+    });
+
+    return borders;
+  }, [pdfMetadata, viewState.scrollY, getVisiblePages]);
+
+  // 处理滚动事件
+  const handleScroll = useCallback((e: React.WheelEvent) => {
+    if (!pdfMetadata) return;
     
-    if (newScale !== viewState.scale) {
-      const rect = containerRef.current!.getBoundingClientRect();
-      const mouseX = e.clientX - rect.left;
-      const mouseY = e.clientY - rect.top;
+    // 如果按住 Ctrl/Cmd，执行缩放
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, viewState.scale * delta));
       
-      // 以鼠标位置为中心缩放
-      const scaleRatio = newScale / viewState.scale;
-      const newOffsetX = mouseX - (mouseX - viewState.offsetX) * scaleRatio;
-      const newOffsetY = mouseY - (mouseY - viewState.offsetY) * scaleRatio;
-      
-      setViewState(prev => ({
-        ...prev,
-        scale: newScale,
-        offsetX: newOffsetX,
-        offsetY: newOffsetY,
-      }));
+      if (newScale !== viewState.scale) {
+        setViewState(prev => ({
+          ...prev,
+          scale: newScale,
+        }));
+      }
+      return;
     }
-  }, [viewState]);
 
-  // 处理鼠标拖拽
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    setIsDragging(true);
-    setLastMousePos({ x: e.clientX, y: e.clientY });
-  }, []);
+    // 让浏览器处理原生滚动，我们监听滚动事件
+  }, [pdfMetadata, viewState]);
 
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!isDragging) return;
+  // 监听容器滚动事件
+  const handleContainerScroll = useCallback(() => {
+    if (!containerRef.current || !pdfMetadata) return;
     
-    const deltaX = e.clientX - lastMousePos.x;
-    const deltaY = e.clientY - lastMousePos.y;
+    const scrollTop = containerRef.current.scrollTop;
+    const containerHeight = containerRef.current.clientHeight;
     
     setViewState(prev => ({
       ...prev,
-      offsetX: prev.offsetX + deltaX,
-      offsetY: prev.offsetY + deltaY,
+      scrollY: scrollTop,
     }));
-    
-    setLastMousePos({ x: e.clientX, y: e.clientY });
-  }, [isDragging, lastMousePos]);
 
-  const handleMouseUp = useCallback(() => {
-    setIsDragging(false);
-  }, []);
+    // 更新当前可见页面
+    const layouts = calculatePageLayouts();
+    const currentPage = layouts.findIndex(layout => 
+      layout.y <= scrollTop + containerHeight / 2 && 
+      layout.y + layout.height > scrollTop + containerHeight / 2
+    );
+    if (currentPage !== -1 && currentPage !== currentVisiblePage) {
+      setCurrentVisiblePage(currentPage);
+    }
+  }, [pdfMetadata, calculatePageLayouts, currentVisiblePage]);
 
-  // 页面导航
-  const goToPage = (page: number) => {
-    if (!pdfMetadata) return;
-    const newPage = Math.max(0, Math.min(pdfMetadata.total_pages - 1, page));
-    setViewState(prev => ({ ...prev, currentPage: newPage }));
+  // 跳转到指定页面
+  const goToPage = (pageIndex: number) => {
+    if (!pdfMetadata || !containerRef.current) return;
+    const layouts = calculatePageLayouts();
+    const targetLayout = layouts[pageIndex];
+    if (targetLayout) {
+      const targetScrollY = targetLayout.y - PAGE_MARGIN;
+      containerRef.current.scrollTop = targetScrollY;
+      setViewState(prev => ({
+        ...prev,
+        scrollY: targetScrollY,
+      }));
+      setCurrentVisiblePage(pageIndex);
+    }
   };
 
   // 重置视图
   const resetView = () => {
-    setViewState(prev => ({
-      ...prev,
+    if (containerRef.current) {
+      containerRef.current.scrollTop = 0;
+    }
+    setViewState({
       scale: 1.0,
-      offsetX: 100,
-      offsetY: 100,
-    }));
+      scrollY: 0,
+    });
+    setCurrentVisiblePage(0);
   };
+
+
 
   // 键盘快捷键
   useEffect(() => {
@@ -249,13 +349,21 @@ function App() {
       if (!pdfMetadata) return;
       
       switch (e.key) {
-        case 'ArrowLeft':
+        case 'Home':
           e.preventDefault();
-          goToPage(viewState.currentPage - 1);
+          goToPage(0);
           break;
-        case 'ArrowRight':
+        case 'End':
           e.preventDefault();
-          goToPage(viewState.currentPage + 1);
+          goToPage(pdfMetadata.total_pages - 1);
+          break;
+        case 'PageUp':
+          e.preventDefault();
+          goToPage(Math.max(0, currentVisiblePage - 1));
+          break;
+        case 'PageDown':
+          e.preventDefault();
+          goToPage(Math.min(pdfMetadata.total_pages - 1, currentVisiblePage + 1));
           break;
         case '+':
         case '=':
@@ -287,7 +395,7 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [pdfMetadata, viewState.currentPage]);
+  }, [pdfMetadata, currentVisiblePage]);
 
   return (
     <div className="app">
@@ -299,21 +407,9 @@ function App() {
         {pdfMetadata && (
           <>
             <div className="page-controls">
-              <button 
-                onClick={() => goToPage(viewState.currentPage - 1)}
-                disabled={viewState.currentPage === 0}
-              >
-                Previous
-              </button>
               <span>
-                Page {viewState.currentPage + 1} of {pdfMetadata.total_pages}
+                Page {currentVisiblePage + 1} of {pdfMetadata.total_pages}
               </span>
-              <button 
-                onClick={() => goToPage(viewState.currentPage + 1)}
-                disabled={viewState.currentPage === pdfMetadata.total_pages - 1}
-              >
-                Next
-              </button>
             </div>
             
             <div className="zoom-controls">
@@ -335,9 +431,7 @@ function App() {
             
             <div className="help-text">
               <small>
-                快捷键: ← → 翻页 | Ctrl/Cmd + +/- 缩放 | Ctrl/Cmd + 0 重置 | DPR: {devicePixelRatio}x | 
-                {performanceStats.loadingTiles > 0 && `加载中: ${performanceStats.loadingTiles} | `}
-                总瓦片: {performanceStats.totalTiles}
+                滚轮滚动翻页 | Ctrl/Cmd + 滚轮缩放 | Ctrl/Cmd + 0 重置
               </small>
             </div>
           </>
@@ -347,14 +441,25 @@ function App() {
       <div
         ref={containerRef}
         className="pdf-container"
-        onWheel={handleWheel}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        style={{ cursor: isDragging ? 'grabbing' : 'grab' }}
+        onWheel={handleScroll}
+        onScroll={handleContainerScroll}
+        style={{ 
+          cursor: 'default',
+        }}
       >
-        {pdfMetadata && renderTiles()}
+        {pdfMetadata && (
+          <div
+            className="pdf-content"
+            style={{
+              position: 'relative',
+              height: `${getTotalDocumentHeight()}px`,
+              width: '100%',
+            }}
+          >
+            {renderPageBorders()}
+            {renderTiles()}
+          </div>
+        )}
       </div>
     </div>
   );
