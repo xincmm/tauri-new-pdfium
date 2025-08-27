@@ -32,8 +32,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "./sidecars/libpdfium.dylib"
+    "resources": [
+      "sidecars/libpdfium.dylib-aarch64-apple-darwin"
     ]
   }
 }

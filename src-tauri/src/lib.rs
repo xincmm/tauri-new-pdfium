@@ -579,11 +579,11 @@ pub fn run() {
             println!("🚀 开始初始化 Tauri 应用...");
 
             let rel_path = if cfg!(target_os = "macos") {
-                "libpdfium.dylib"
+                "sidecars/libpdfium.dylib-aarch64-apple-darwin"
             } else if cfg!(target_os = "windows") {
-                "pdfium.dll"
+                "sidecars/pdfium.dll"
             } else {
-                "libpdfium.so"
+                "sidecars/libpdfium.so"
             };
 
             println!("🔍 解析 Pdfium 库路径，相对路径: {}", rel_path);
