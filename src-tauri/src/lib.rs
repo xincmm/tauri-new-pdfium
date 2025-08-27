@@ -181,7 +181,6 @@ async fn open_pdf(
 async fn get_page_text_layout(
     id: String,
     page: u32,
-    state: tauri::State<'_, PdfiumLibraryPath>,
 ) -> Result<PageTextLayout, String> {
     println!("📐 获取页面文本布局: id={}, page={}", id, page);
 
@@ -265,7 +264,6 @@ async fn extract_text_range(
     page: u32,
     start: u32,
     end: u32,
-    state: tauri::State<'_, PdfiumLibraryPath>,
 ) -> Result<String, String> {
     println!("📝 提取文本范围: id={}, page={}, start={}, end={}", id, page, start, end);
 

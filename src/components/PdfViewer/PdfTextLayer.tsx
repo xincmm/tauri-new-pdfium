@@ -114,45 +114,82 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
   // 计算高亮矩形
   const highlightRects = useMemo(() => {
     if (!layout || anchor === null || focus === null) return [];
-    
+
     const start = Math.max(0, Math.min(anchor, focus));
-    const end = Math.min(layout.chars.length - 1, Math.max(anchor, focus));
-    
-    // 字符 -> 像素矩形
-    const rects = [];
+    const end   = Math.min(layout.chars.length - 1, Math.max(anchor, focus));
+
+    // —— 工具：字符包围盒转像素矩形 + 行聚类 ——
+    // 计算一次就好：与缩放相关的像素级 padding
+    const padPx = Math.max(1, Math.round(scaleFactor(scale) * 0.3));
+
+    type PxBox = {
+      x0: number; x1: number; y0: number; y1: number;
+      h: number; cy: number; idx: number;
+    };
+
+    function charToPxBox(ch: CharBoxPt, pageHpt: number, scale: number): PxBox {
+      let x0 = ptXToPx(ch.left, scale);
+      let x1 = ptXToPx(ch.right, scale);
+      let yTop = ptYToPx(ch.top, pageHpt, scale);      // 翻转后：小的是更"上"
+      let yBot = ptYToPx(ch.bottom, pageHpt, scale);
+      if (yTop > yBot) [yTop, yBot] = [yBot, yTop];
+      const h = yBot - yTop;
+      return { x0, x1, y0: yTop, y1: yBot, h, cy: yTop + h / 2, idx: ch.idx };
+    }
+
+    // 两个盒子的垂直重叠比例（相对较小高度）
+    function vOverlapRatio(a: PxBox, b: PxBox): number {
+      const top = Math.max(a.y0, b.y0);
+      const bot = Math.min(a.y1, b.y1);
+      const overlap = Math.max(0, bot - top);
+      return overlap / Math.max(1, Math.min(a.h, b.h));
+    }
+
+    // 把若干字符盒子聚成"行"
+    function groupIntoRows(boxes: PxBox[], thr = 0.6) {
+      const rows: { y0: number; y1: number; cy: number; items: PxBox[] }[] = [];
+      // 先按垂直中心排序，便于贪心归并
+      boxes.sort((a, b) => a.cy - b.cy);
+      for (const b of boxes) {
+        let target = rows.find(r => vOverlapRatio(
+          { x0: 0, x1: 0, y0: r.y0, y1: r.y1, h: r.y1 - r.y0, cy: r.cy, idx: -1 } as PxBox, b
+        ) >= thr);
+        if (!target) {
+          target = { y0: b.y0, y1: b.y1, cy: b.cy, items: [b] };
+          rows.push(target);
+        } else {
+          target.items.push(b);
+          target.y0 = Math.min(target.y0, b.y0);
+          target.y1 = Math.max(target.y1, b.y1);
+          target.cy = (target.y0 + target.y1) / 2;
+        }
+      }
+      // 每行按 x 排序
+      rows.forEach(r => r.items.sort((a, b) => a.x0 - b.x0));
+      return rows;
+    }
+
+    // 仅取被选中的字符 -> 像素盒
+    const selected: PxBox[] = [];
     for (let i = start; i <= end; i++) {
-      const ch = layout.chars[i];
-      const x0 = ptXToPx(ch.left, scale);
-      const x1 = ptXToPx(ch.right, scale);
-      const y0 = ptYToPx(ch.top, pageHeightPt, scale);
-      const y1 = ptYToPx(ch.bottom, pageHeightPt, scale);
-      rects.push({ x0, y0, x1, y1 });
+      selected.push(charToPxBox(layout.chars[i], pageHeightPt, scale));
     }
-    
-    // 合并同行
-    const merged: {x0: number, y0: number, x1: number, y1: number}[] = [];
-    const tol = 3;
-    let cur: any = null;
-    
-    for (const r of rects) {
-      if (!cur) {
-        cur = { ...r };
-        continue;
-      }
-      
-      const same = Math.abs(r.y0 - cur.y0) <= tol && Math.abs(r.y1 - cur.y1) <= tol;
-      if (same) {
-        cur.x1 = Math.max(cur.x1, r.x1);
-        cur.y0 = Math.min(cur.y0, r.y0);
-        cur.y1 = Math.max(cur.y1, r.y1);
-      } else {
-        merged.push(cur);
-        cur = { ...r };
-      }
-    }
-    
-    if (cur) merged.push(cur);
-    return merged;
+
+    // 按垂直重叠聚成"行"，每行整段合并
+    const rows = groupIntoRows(selected, 0.6);
+
+    // 输出：一行用"首字符左 → 末字符右；行内最高高度"的整块
+    const rects = rows.map(r => {
+      const x0 = r.items[0].x0 - padPx;
+      const x1 = r.items[r.items.length - 1].x1 + padPx;
+      const y0 = r.y0 - Math.ceil(padPx * 0.2);
+      const y1 = r.y1 + Math.ceil(padPx * 0.2);
+      return { x0, y0, x1, y1 };
+    });
+
+    // 跨行时，按 y 再排序一下，渲染会更自然
+    rects.sort((a, b) => a.y0 - b.y0);
+    return rects;
   }, [layout, anchor, focus, scale, pageHeightPt]);
 
   // 绘制选区高亮
