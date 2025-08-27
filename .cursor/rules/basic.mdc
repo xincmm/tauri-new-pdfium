@@ -1,0 +1,25 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# MCP Interactive Feedback 规则
+
+注意根据mcp-feedback-termianl工具的要求在任务完成前进行工具调用。在任务完成前一定要调用interactive_feedback 工具来提醒我检查问题
+
+# 命令执行限制规则
+
+不要执行任何测试性质的命令，包括但不限于：
+- pnpm dev / npm run dev
+- pnpm start / npm start
+- pnpm test / npm test
+- 任何启动开发服务器或测试的命令
+- 不要验证修改是否争取，用户会自己验证
+- 不要主动新建分支
+- 不要主动使用 git 提交代码
+- 不要修复 css 类排序的问题
+
+用户会自己执行这些命令来验证结果。
+
+# tailwind css 要求
+使用 neutral 族的颜色，包括背景色，字体颜色
