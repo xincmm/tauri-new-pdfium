@@ -12,9 +12,9 @@ use std::{collections::HashMap, num::NonZeroUsize, sync::Arc};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
-const TILE_SIZE: u32 = 512;
+const TILE_SIZE: u32 = 768;
 // 降低BASE_DPI以提升性能，144 DPI在大多数情况下已足够清晰
-const BASE_DPI: f32 = 144.0;
+const BASE_DPI: f32 = 150.0;
 const WEBP_QUALITY: u8 = 80;
 // 最大DPI限制，防止内存过度使用
 const MAX_DPI: f32 = 600.0;
@@ -94,6 +94,9 @@ pub struct PageTextLayout {
 
 // 全局状态，存储 Pdfium 库的路径
 pub struct PdfiumLibraryPath(pub String);
+
+// 全局静态变量存储 Pdfium 库路径，供 spawn_blocking 中使用
+static PDFIUM_LIBRARY_PATH: once_cell::sync::OnceCell<String> = once_cell::sync::OnceCell::new();
 
 #[tauri::command]
 async fn open_pdf(
@@ -193,14 +196,9 @@ async fn get_page_text_layout(id: String, page: u32) -> Result<PageTextLayout, S
 
     // 在spawn_blocking中执行CPU密集型的Pdfium操作
     let layout = tauri::async_runtime::spawn_blocking(move || -> Result<PageTextLayout, String> {
-        // 重新绑定Pdfium库
-        let library_path = if cfg!(target_os = "macos") {
-            "sidecars/libpdfium.dylib-aarch64-apple-darwin"
-        } else if cfg!(target_os = "windows") {
-            "sidecars/pdfium.dll"
-        } else {
-            "sidecars/libpdfium.so"
-        };
+        // 使用全局存储的 Pdfium 库路径
+        let library_path = PDFIUM_LIBRARY_PATH.get()
+            .ok_or_else(|| "Pdfium library path not initialized".to_string())?;
 
         let bindings = Pdfium::bind_to_library(library_path)
             .or_else(|_| Pdfium::bind_to_system_library())
@@ -278,14 +276,9 @@ async fn extract_text_range(id: String, page: u32, start: u32, end: u32) -> Resu
 
     // 在spawn_blocking中执行CPU密集型的Pdfium操作
     let text = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        // 重新绑定Pdfium库
-        let library_path = if cfg!(target_os = "macos") {
-            "sidecars/libpdfium.dylib-aarch64-apple-darwin"
-        } else if cfg!(target_os = "windows") {
-            "sidecars/pdfium.dll"
-        } else {
-            "sidecars/libpdfium.so"
-        };
+        // 使用全局存储的 Pdfium 库路径
+        let library_path = PDFIUM_LIBRARY_PATH.get()
+            .ok_or_else(|| "Pdfium library path not initialized".to_string())?;
 
         let bindings = Pdfium::bind_to_library(library_path)
             .or_else(|_| Pdfium::bind_to_system_library())
@@ -358,14 +351,9 @@ async fn ensure_page_image(
 
     // 在spawn_blocking中执行CPU密集型的Pdfium操作
     let page_img = tauri::async_runtime::spawn_blocking(move || -> Result<image::DynamicImage> {
-        // 重新绑定Pdfium库
-        let library_path = if cfg!(target_os = "macos") {
-            "sidecars/libpdfium.dylib-aarch64-apple-darwin"
-        } else if cfg!(target_os = "windows") {
-            "sidecars/pdfium.dll"
-        } else {
-            "sidecars/libpdfium.so"
-        };
+        // 使用全局存储的 Pdfium 库路径
+        let library_path = PDFIUM_LIBRARY_PATH.get()
+            .ok_or_else(|| anyhow!("Pdfium library path not initialized"))?;
 
         let bindings =
             Pdfium::bind_to_library(library_path).or_else(|_| Pdfium::bind_to_system_library())?;
@@ -605,6 +593,9 @@ pub fn run() {
                 eprintln!("❌ Pdfium 库文件不存在: {}", library_path);
             }
 
+            // 设置全局 Pdfium 库路径
+            PDFIUM_LIBRARY_PATH.set(library_path.clone()).unwrap();
+            
             app.manage(PdfiumLibraryPath(library_path));
             println!("💾 PdfiumLibraryPath 状态已管理");
 
