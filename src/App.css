@@ -211,11 +211,39 @@ button {
   font-size: 12px;
 }
 
-.pdf-canvas {
+.pdf-container {
   flex: 1;
-  display: block;
+  position: relative;
   background: #f8f8f8;
   outline: none;
+  overflow: hidden;
+  /* 高DPI屏幕优化 */
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+}
+
+.pdf-container img {
+  /* 确保瓦片图片清晰显示 */
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
+  user-select: none;
+  -webkit-user-drag: none;
+  transition: opacity 0.2s ease-in-out;
+}
+
+.pdf-container img:not([src]) {
+  /* 加载中的瓦片样式 */
+  background: #e0e0e0;
+  opacity: 0.5;
+}
+
+.pdf-container img[src=""] {
+  /* 加载失败的瓦片样式 */
+  background: #f0f0f0;
+  opacity: 0.3;
 }
 
 /* 响应式设计 */

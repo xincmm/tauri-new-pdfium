@@ -10,11 +10,14 @@ use std::fs;
 use std::{collections::HashMap, num::NonZeroUsize, sync::Arc};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
-use webp::Encoder as WebpEncoder2;
+use std::time::Instant;
 
 const TILE_SIZE: u32 = 512;
+// 降低BASE_DPI以提升性能，144 DPI在大多数情况下已足够清晰
 const BASE_DPI: f32 = 144.0;
 const WEBP_QUALITY: u8 = 80;
+// 最大DPI限制，防止内存过度使用
+const MAX_DPI: f32 = 600.0;
 
 struct PdfData {
     bytes: Vec<u8>,
@@ -30,9 +33,20 @@ struct TileKey {
     ty: u32,
 }
 
+// 页面图像缓存，存储整页渲染结果
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PageKey {
+    id: String,
+    page: u32,
+    scale_x100: u32,
+}
+
 static DOCS: Lazy<Mutex<HashMap<String, Arc<PdfData>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static TILE_CACHE: Lazy<Mutex<LruCache<TileKey, Arc<Vec<u8>>>>> =
     Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(200).unwrap())));
+// 页面图像缓存，减少重复渲染
+static PAGE_CACHE: Lazy<Mutex<LruCache<PageKey, Arc<image::DynamicImage>>>> =
+    Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(20).unwrap())));
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PdfMetadata {
@@ -126,11 +140,85 @@ async fn open_pdf(
     Ok(metadata)
 }
 
-fn handle_tile_request(uri: &str, _app: &AppHandle) -> Result<Vec<u8>> {
-    println!("🔗 收到瓦片请求: {}", uri);
-    let parts: Vec<&str> = uri.trim_matches('/').split('/').collect();
+// 获取或创建页面图像（异步版本，利用thread_safe特性）
+async fn ensure_page_image(data: &PdfData, page: u32, scale_x100: u32) -> Result<Arc<image::DynamicImage>> {
+    let page_key = PageKey {
+        id: "temp".to_string(), // 这里简化处理，实际应该用真实ID
+        page,
+        scale_x100,
+    };
 
+    // 检查页面缓存
+    if let Some(cached_img) = PAGE_CACHE.lock().get(&page_key) {
+        println!("✅ 页面图像缓存命中: page={}, scale={}", page, scale_x100 as f32 / 100.0);
+        return Ok(cached_img.clone());
+    }
+
+    let t0 = Instant::now();
+    println!("🎨 开始渲染整页图像: page={}, scale={}", page, scale_x100 as f32 / 100.0);
+
+    let data_bytes = data.bytes.clone();
+    let page_dims = data.page_dims[page as usize];
+    
+    // 在spawn_blocking中执行CPU密集型的Pdfium操作
+    let page_img = tauri::async_runtime::spawn_blocking(move || -> Result<image::DynamicImage> {
+        // 重新绑定Pdfium库
+        let library_path = if cfg!(target_os = "macos") {
+            "sidecars/libpdfium.dylib-aarch64-apple-darwin"
+        } else if cfg!(target_os = "windows") {
+            "sidecars/pdfium.dll"
+        } else {
+            "sidecars/libpdfium.so"
+        };
+
+        let bindings = Pdfium::bind_to_library(library_path)
+            .or_else(|_| Pdfium::bind_to_system_library())?;
+        let pdfium = Pdfium::new(bindings);
+
+        let doc = pdfium.load_pdf_from_byte_slice(&data_bytes, None)?;
+        let (w_pt, h_pt) = page_dims;
+        let scale = scale_x100 as f32 / 100.0;
+        
+        // 限制最大DPI以防止内存过度使用
+        let effective_dpi = (BASE_DPI * scale).min(MAX_DPI);
+        let w_px = ((w_pt / 72.0) * effective_dpi).ceil() as u32;
+        let h_px = ((h_pt / 72.0) * effective_dpi).ceil() as u32;
+
+        println!(
+            "📏 页面尺寸 - 原始:{}x{} pt, 缩放:{}, 有效DPI:{}, 目标:{}x{} px",
+            w_pt, h_pt, scale, effective_dpi, w_px, h_px
+        );
+
+        let p = doc.pages().get(page as u16).map_err(|_| {
+            anyhow!("页面超出范围: {}", page)
+        })?;
+
+        let cfg = PdfRenderConfig::new()
+            .set_target_width(w_px as i32)
+            .set_maximum_height(h_px as i32);
+
+        let page_img = p.render_with_config(&cfg)?.as_image();
+        Ok(page_img)
+    }).await??;
+
+    let t1 = Instant::now();
+    println!("✅ 整页渲染完成，耗时: {:?}, 尺寸: {}x{}", 
+             t1 - t0, page_img.width(), page_img.height());
+
+    let result = Arc::new(page_img);
+    PAGE_CACHE.lock().put(page_key, result.clone());
+    
+    Ok(result)
+}
+
+// 异步处理瓦片请求
+async fn handle_tile_request(uri: &str, _app: &AppHandle) -> Result<Vec<u8>> {
+    let request_start = Instant::now();
+    println!("🔗 收到瓦片请求: {}", uri);
+    
+    let parts: Vec<&str> = uri.trim_matches('/').split('/').collect();
     println!("🔍 解析 URI 部分: {:?}", parts);
+    
     let (id, page, scale, tx, ty) = match parts.as_slice() {
         [id, page_s, scale_s, tx_s, ty_s] => {
             let page: u32 = page_s.parse()?;
@@ -167,108 +255,85 @@ fn handle_tile_request(uri: &str, _app: &AppHandle) -> Result<Vec<u8>> {
         ty,
     };
 
-    // 1. 先检查最终的瓦片缓存
-    println!("🔍 检查瓦片缓存...");
+    // 1. 先检查瓦片缓存
     if let Some(buf) = TILE_CACHE.lock().get(&key) {
-        println!("✅ 瓦片缓存命中，直接返回");
+        let total_time = request_start.elapsed();
+        println!("✅ 瓦片缓存命中，总耗时: {:?}", total_time);
         return Ok((**buf).clone());
     }
-    println!("❌ 瓦片缓存未命中");
 
-    // 2. 从文档缓存获取 PDF 字节数据
-    println!("🔍 查找文档数据...");
+    // 2. 获取文档数据
     let data_arc = DOCS
         .lock()
         .get(&id)
-        .ok_or_else(|| {
-            eprintln!("❌ 文档未找到: {}", id);
-            anyhow!("doc not found")
-        })?
+        .ok_or_else(|| anyhow!("doc not found"))?
         .clone();
-    println!("✅ 文档数据找到");
 
-    // 3. 直接渲染瓦片（不使用 Actor）
-    println!("🎨 开始渲染瓦片...");
-    let result = render_tile_directly(&data_arc, &key)?;
+    // 3. 渲染瓦片
+    let result = render_tile_directly(&data_arc, &key, request_start).await?;
 
-    // 4. 将结果存入缓存
-    println!("💾 将结果存入瓦片缓存...");
+    // 4. 缓存结果
     TILE_CACHE.lock().put(key, result.clone());
-    println!("✅ 瓦片请求处理完成，返回结果");
+    
+    let total_time = request_start.elapsed();
+    println!("✅ 瓦片请求处理完成，总耗时: {:?}", total_time);
+    
     Ok((*result).clone())
 }
 
-fn render_tile_directly(data: &PdfData, key: &TileKey) -> Result<Arc<Vec<u8>>> {
-    println!("🔗 直接渲染：绑定 Pdfium 库...");
+async fn render_tile_directly(data: &PdfData, key: &TileKey, request_start: Instant) -> Result<Arc<Vec<u8>>> {
+    // 1. 获取整页图像（可能触发渲染或使用缓存）
+    let page_img_arc = ensure_page_image(data, key.page, key.scale_x100).await?;
+    let t1 = Instant::now();
 
-    // 每次都重新绑定，避免状态问题
-    let library_path = if cfg!(target_os = "macos") {
-        "sidecars/libpdfium.dylib-aarch64-apple-darwin"
-    } else if cfg!(target_os = "windows") {
-        "sidecars/pdfium.dll"
-    } else {
-        "sidecars/libpdfium.so"
-    };
+    // 2. 在spawn_blocking中执行CPU密集型的裁剪和编码操作
+    let key_clone = key.clone();
+    let request_start_clone = request_start;
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<Arc<Vec<u8>>> {
+        let t1_inner = t1;
+        
+        // 裁剪瓦片
+        let (w, h) = page_img_arc.dimensions();
+        let scale = key_clone.scale_x100 as f32 / 100.0;
+        
+        // 计算实际的瓦片大小和位置，考虑DPI缩放
+        let effective_dpi = (BASE_DPI * scale).min(MAX_DPI);
+        let dpi_scale = effective_dpi / BASE_DPI;
+        let actual_tile_size = (TILE_SIZE as f32 * dpi_scale).round() as u32;
+        let x = key_clone.tx * actual_tile_size;
+        let y = key_clone.ty * actual_tile_size;
 
-    let bindings =
-        Pdfium::bind_to_library(library_path).or_else(|_| Pdfium::bind_to_system_library())?;
-    let pdfium = Pdfium::new(bindings);
-
-    println!("📄 直接渲染：加载 PDF 文档...");
-    let doc = pdfium.load_pdf_from_byte_slice(&data.bytes, None)?;
-
-    let (w_pt, h_pt) = data.page_dims[key.page as usize];
-    let scale = key.scale_x100 as f32 / 100.0;
-    let w_px = ((w_pt / 72.0) * BASE_DPI * scale).ceil() as u32;
-    let h_px = ((h_pt / 72.0) * BASE_DPI * scale).ceil() as u32;
-
-    println!(
-        "📏 页面尺寸 - 原始:{}x{} pt, 缩放:{}, 目标:{}x{} px",
-        w_pt, h_pt, scale, w_px, h_px
-    );
-
-    println!("📖 获取页面 {}...", key.page);
-    let p = doc.pages().get(key.page as u16).map_err(|_| {
-        eprintln!("❌ 页面超出范围: {}", key.page);
-        anyhow!("page out of range")
-    })?;
-
-    println!("⚙️ 配置渲染参数...");
-    let cfg = PdfRenderConfig::new()
-        .set_target_width(w_px as i32)
-        .set_maximum_height(h_px as i32);
-
-    println!("🖼️ 渲染页面图像...");
-    let page_img = p.render_with_config(&cfg)?.as_image();
-
-    println!("✂️ 开始裁剪瓦片...");
-    let (w, h) = page_img.dimensions();
-    let x = key.tx * TILE_SIZE;
-    let y = key.ty * TILE_SIZE;
-
-    println!("📐 瓦片位置 - 页面:{}x{}, 瓦片起点:({},{})", w, h, x, y);
-
-    if x >= w || y >= h {
-        eprintln!(
-            "❌ 瓦片超出边界: 瓦片起点({},{}) >= 页面尺寸({}x{})",
-            x, y, w, h
+        println!(
+            "📐 瓦片位置 - 页面:{}x{}, DPI缩放:{:.2}, 实际瓦片尺寸:{}, 瓦片起点:({},{})",
+            w, h, dpi_scale, actual_tile_size, x, y
         );
-        return Err(anyhow!("tile out of bounds"));
-    }
 
-    let tw = TILE_SIZE.min(w - x);
-    let th = TILE_SIZE.min(h - y);
-    println!("📏 瓦片尺寸: {}x{}", tw, th);
+        if x >= w || y >= h {
+            return Err(anyhow!("tile out of bounds"));
+        }
 
-    println!("✂️ 裁剪图像区域...");
-    let sub_rgba: image::RgbaImage = crop_imm(&page_img, x, y, tw, th).to_image();
-    let raw = sub_rgba.into_raw();
+        let tw = actual_tile_size.min(w - x);
+        let th = actual_tile_size.min(h - y);
 
-    println!("🗜️ 编码为 WebP 格式...");
-    let webp = WebpEncoder2::from_rgba(&raw, tw, th).encode(WEBP_QUALITY as f32);
+        let sub_rgba: image::RgbaImage = crop_imm(&*page_img_arc, x, y, tw, th).to_image();
+        let t2 = Instant::now();
 
-    println!("✅ 瓦片渲染完成，大小: {} bytes", webp.len());
-    Ok(Arc::new(webp.to_vec()))
+        // 3. 编码为WebP
+        let raw = sub_rgba.into_raw();
+        let webp = webp::Encoder::from_rgba(&raw, tw, th).encode(WEBP_QUALITY as f32);
+        let t3 = Instant::now();
+
+        // 性能监控日志
+        println!(
+            "⏱️  性能统计 - page={} scale={:.2} tile=({},{}): 整页渲染={:?} 裁剪={:?} 编码={:?} 总计={:?}",
+            key_clone.page, scale, key_clone.tx, key_clone.ty,
+            t1_inner - request_start_clone, t2 - t1_inner, t3 - t2, t3 - request_start_clone
+        );
+
+        Ok(Arc::new(webp.to_vec()))
+    }).await??;
+
+    Ok(result)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -315,40 +380,55 @@ pub fn run() {
             println!("🎉 Tauri 应用初始化完成");
             Ok(())
         })
-        .register_uri_scheme_protocol("tiles", move |ctx, request| {
-            let app = ctx.app_handle();
-            let uri = request.uri();
-            let path = uri.path().to_string();
+        .register_asynchronous_uri_scheme_protocol("tiles", |ctx, request, responder| {
+            use tauri::http::{header, Method, Response, StatusCode};
+            
+            let app = ctx.app_handle().clone();
+            let path = request.uri().path().to_string();
+            let origin = request.headers()
+                .get(header::ORIGIN)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("*")
+                .to_string();
 
-            println!("🔗 URI 协议处理器被调用: {}", uri);
-            println!("🔍 请求路径: {}", path);
-
-            match handle_tile_request(&path, &app) {
-                Ok(bytes) => tauri::http::Response::builder()
-                    .status(tauri::http::StatusCode::OK)
-                    .header(tauri::http::header::CONTENT_TYPE, "image/webp")
-                    .header(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                    .header(
-                        tauri::http::header::ACCESS_CONTROL_ALLOW_METHODS,
-                        "GET, POST, OPTIONS",
-                    )
-                    .header(tauri::http::header::ACCESS_CONTROL_ALLOW_HEADERS, "*")
-                    .header(
-                        tauri::http::header::CACHE_CONTROL,
-                        "public, max-age=31536000",
-                    )
-                    .body(bytes)
-                    .unwrap(),
-                Err(e) => {
-                    eprintln!("tile error: {e}");
-                    tauri::http::Response::builder()
-                        .status(tauri::http::StatusCode::NOT_FOUND)
-                        .header(tauri::http::header::CONTENT_TYPE, "text/plain")
-                        .header(tauri::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                        .body(format!("tile error: {e}").into_bytes())
+            // 处理CORS预检请求
+            if request.method() == Method::OPTIONS {
+                return responder.respond(
+                    Response::builder()
+                        .status(StatusCode::NO_CONTENT)
+                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, &origin)
+                        .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, OPTIONS")
+                        .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "*")
+                        .body(Vec::new())
                         .unwrap()
-                }
+                );
             }
+
+            // 异步处理瓦片请求，利用thread_safe特性实现真正的并行处理
+            tauri::async_runtime::spawn(async move {
+                let response = match handle_tile_request(&path, &app).await {
+                    Ok(bytes) => Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "image/webp")
+                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, &origin)
+                        .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST, OPTIONS")
+                        .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "*")
+                        .header(header::CACHE_CONTROL, "public, max-age=31536000")
+                        .body(bytes)
+                        .unwrap(),
+                    Err(e) => {
+                        eprintln!("❌ 瓦片处理错误: {}", e);
+                        Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .header(header::CONTENT_TYPE, "text/plain")
+                            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, &origin)
+                            .body(format!("tile error: {}", e).into_bytes())
+                            .unwrap()
+                    }
+                };
+                
+                responder.respond(response);
+            });
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -29,7 +29,7 @@ const MIN_SCALE = 0.1;
 const MAX_SCALE = 5.0;
 
 function App() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [pdfMetadata, setPdfMetadata] = useState<PdfMetadata | null>(null);
   const [viewState, setViewState] = useState<ViewState>({
     scale: 1.0,
@@ -39,8 +39,15 @@ function App() {
   });
   const [isDragging, setIsDragging] = useState(false);
   const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
-  const [tileCache] = useState(new Map<string, HTMLImageElement>());
   const [loading, setLoading] = useState(false);
+  // 获取设备像素比，用于高DPI屏幕支持
+  const [devicePixelRatio] = useState(() => window.devicePixelRatio || 1);
+  // 性能监控状态
+  const [performanceStats, setPerformanceStats] = useState({ 
+    loadingTiles: 0, 
+    totalTiles: 0,
+    avgLoadTime: 0 
+  });
 
   // 打开 PDF 文件
   const openPdfFile = async () => {
@@ -67,51 +74,17 @@ function App() {
     }
   };
 
-  // 获取 tile URL
+  // 获取 tile URL，考虑设备像素比
   const getTileUrl = (tileInfo: TileInfo): string => {
     const { id, page, scale, tx, ty } = tileInfo;
-    return `tiles://localhost/${id}/${page}/${scale}/${tx}/${ty}.webp`;
+    // 根据设备像素比调整请求的缩放级别，确保高DPI屏幕的清晰度
+    const adjustedScale = scale * devicePixelRatio;
+    return `tiles://localhost/${id}/${page}/${adjustedScale}/${tx}/${ty}.webp`;
   };
 
-  // 获取 tile 缓存键
-  const getTileKey = (tileInfo: TileInfo): string => {
-    return `${tileInfo.id}_${tileInfo.page}_${tileInfo.scale}_${tileInfo.tx}_${tileInfo.ty}`;
-  };
-
-  // 加载 tile 图片
-  const loadTile = useCallback(async (tileInfo: TileInfo): Promise<HTMLImageElement> => {
-    const key = getTileKey(tileInfo);
-    
-    // 检查缓存
-    if (tileCache.has(key)) {
-      return tileCache.get(key)!;
-    }
-
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      
-      img.onload = () => {
-        tileCache.set(key, img);
-        resolve(img);
-      };
-      
-      img.onerror = () => {
-        console.error('Failed to load tile:', getTileUrl(tileInfo));
-        reject(new Error('Failed to load tile'));
-      };
-      
-      img.src = getTileUrl(tileInfo);
-    });
-  }, [tileCache]);
-
-  // 渲染当前页面
-  const renderPage = useCallback(async () => {
-    if (!pdfMetadata || !canvasRef.current) return;
-
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+  // 渲染当前页面的瓦片
+  const renderTiles = useCallback(() => {
+    if (!pdfMetadata || !containerRef.current) return [];
 
     const { scale, offsetX, offsetY, currentPage } = viewState;
     const [pageWidth, pageHeight] = pdfMetadata.page_dims[currentPage];
@@ -121,21 +94,20 @@ function App() {
     const screenPageWidth = ((pageWidth / 72.0) * baseDpi * scale);
     const screenPageHeight = ((pageHeight / 72.0) * baseDpi * scale);
 
-    // 清空画布
-    ctx.fillStyle = '#f0f0f0';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // 获取容器尺寸
+    const containerWidth = containerRef.current.clientWidth;
+    const containerHeight = containerRef.current.clientHeight;
 
     // 计算需要渲染的 tile 范围
     const startTileX = Math.max(0, Math.floor(-offsetX / TILE_SIZE));
-    const endTileX = Math.ceil((canvas.width - offsetX) / TILE_SIZE);
+    const endTileX = Math.ceil((containerWidth - offsetX) / TILE_SIZE);
     const startTileY = Math.max(0, Math.floor(-offsetY / TILE_SIZE));
-    const endTileY = Math.ceil((canvas.height - offsetY) / TILE_SIZE);
+    const endTileY = Math.ceil((containerHeight - offsetY) / TILE_SIZE);
 
     const maxTileX = Math.ceil(screenPageWidth / TILE_SIZE);
     const maxTileY = Math.ceil(screenPageHeight / TILE_SIZE);
 
-    // 加载并渲染 tiles
-    const tilePromises: Promise<void>[] = [];
+    const tiles: React.ReactElement[] = [];
 
     for (let tx = startTileX; tx < Math.min(endTileX, maxTileX); tx++) {
       for (let ty = startTileY; ty < Math.min(endTileY, maxTileY); ty++) {
@@ -147,27 +119,61 @@ function App() {
           ty,
         };
 
-        const tilePromise = loadTile(tileInfo).then(img => {
-          // 计算 tile 在 canvas 上的位置
-          const x = offsetX + tx * TILE_SIZE;
-          const y = offsetY + ty * TILE_SIZE;
-          
-          // 计算实际渲染尺寸（处理边缘 tile）
-          const renderWidth = Math.min(TILE_SIZE, screenPageWidth - tx * TILE_SIZE);
-          const renderHeight = Math.min(TILE_SIZE, screenPageHeight - ty * TILE_SIZE);
-          
-          ctx.drawImage(img, x, y, renderWidth, renderHeight);
-        }).catch(err => {
-          console.warn('Failed to load tile:', tileInfo, err);
-        });
+        // 计算 tile 的位置和尺寸
+        const x = offsetX + tx * TILE_SIZE;
+        const y = offsetY + ty * TILE_SIZE;
+        
+        // 计算实际渲染尺寸（处理边缘 tile）
+        const renderWidth = Math.min(TILE_SIZE, screenPageWidth - tx * TILE_SIZE);
+        const renderHeight = Math.min(TILE_SIZE, screenPageHeight - ty * TILE_SIZE);
 
-        tilePromises.push(tilePromise);
+        const key = `${tileInfo.id}_${tileInfo.page}_${tileInfo.scale}_${tileInfo.tx}_${tileInfo.ty}`;
+
+        tiles.push(
+          <img
+            key={key}
+            src={getTileUrl(tileInfo)}
+            alt={`Tile ${tx},${ty}`}
+            style={{
+              position: 'absolute',
+              left: `${x}px`,
+              top: `${y}px`,
+              width: `${renderWidth}px`,
+              height: `${renderHeight}px`,
+              imageRendering: 'pixelated', // 保持清晰度
+              pointerEvents: 'none', // 不响应鼠标事件
+            }}
+            onLoad={() => {
+              // 更新性能统计
+              setPerformanceStats(prev => ({
+                ...prev,
+                loadingTiles: Math.max(0, prev.loadingTiles - 1)
+              }));
+            }}
+            onLoadStart={() => {
+              // 开始加载时更新统计
+              setPerformanceStats(prev => ({
+                ...prev,
+                loadingTiles: prev.loadingTiles + 1,
+                totalTiles: prev.totalTiles + 1
+              }));
+            }}
+            onError={(e) => {
+              console.warn('Failed to load tile:', tileInfo);
+              // 隐藏加载失败的瓦片
+              e.currentTarget.style.display = 'none';
+              setPerformanceStats(prev => ({
+                ...prev,
+                loadingTiles: Math.max(0, prev.loadingTiles - 1)
+              }));
+            }}
+          />
+        );
       }
     }
 
-    // 等待所有 tiles 加载完成
-    await Promise.allSettled(tilePromises);
-  }, [pdfMetadata, viewState, loadTile]);
+    return tiles;
+  }, [pdfMetadata, viewState, devicePixelRatio]);
 
   // 处理鼠标滚轮缩放
   const handleWheel = useCallback((e: React.WheelEvent) => {
@@ -177,7 +183,7 @@ function App() {
     const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, viewState.scale * delta));
     
     if (newScale !== viewState.scale) {
-      const rect = canvasRef.current!.getBoundingClientRect();
+      const rect = containerRef.current!.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
       const mouseY = e.clientY - rect.top;
       
@@ -237,21 +243,6 @@ function App() {
     }));
   };
 
-  // 画布尺寸调整
-  useEffect(() => {
-    const handleResize = () => {
-      if (canvasRef.current) {
-        const canvas = canvasRef.current;
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight - 100; // 留出控制栏空间
-      }
-    };
-
-    handleResize();
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
-
   // 键盘快捷键
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -297,11 +288,6 @@ function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [pdfMetadata, viewState.currentPage]);
-
-  // 渲染页面
-  useEffect(() => {
-    renderPage();
-  }, [renderPage]);
 
   return (
     <div className="app">
@@ -349,23 +335,27 @@ function App() {
             
             <div className="help-text">
               <small>
-                快捷键: ← → 翻页 | Ctrl/Cmd + +/- 缩放 | Ctrl/Cmd + 0 重置
+                快捷键: ← → 翻页 | Ctrl/Cmd + +/- 缩放 | Ctrl/Cmd + 0 重置 | DPR: {devicePixelRatio}x | 
+                {performanceStats.loadingTiles > 0 && `加载中: ${performanceStats.loadingTiles} | `}
+                总瓦片: {performanceStats.totalTiles}
               </small>
             </div>
           </>
         )}
       </div>
 
-      <canvas
-        ref={canvasRef}
-        className="pdf-canvas"
+      <div
+        ref={containerRef}
+        className="pdf-container"
         onWheel={handleWheel}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
         style={{ cursor: isDragging ? 'grabbing' : 'grab' }}
-      />
+      >
+        {pdfMetadata && renderTiles()}
+      </div>
     </div>
   );
 }
