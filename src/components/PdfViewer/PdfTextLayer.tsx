@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { PageTextLayout, CharBoxPt, BASE_DPI } from '../../types/pdf';
+import { CrossPageSelection } from '../../hooks/usePdfState';
 
 interface PdfTextLayerProps {
   pdfId: string;
@@ -11,6 +13,12 @@ interface PdfTextLayerProps {
   pageWidthPt: number;
   pageHeightPt: number;
   onTextSelect?: (text: string) => void;
+  // 跨页选区相关
+  crossPageSelection: CrossPageSelection | null;
+  onCrossPageSelectionChange: (selection: CrossPageSelection | null) => void;
+  onGlobalMouseDown?: (pageIndex: number, charIndex: number) => void;
+  onGlobalMouseMove?: (pageIndex: number, charIndex: number, startPageIndex?: number, startCharIndex?: number) => void;
+  onGlobalMouseUp?: () => void;
 }
 
 // === 工具：pt <-> px（含 y 翻转） ===
@@ -45,13 +53,20 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
   scale,
   pageWidthPt,
   pageHeightPt,
-  onTextSelect
+  onTextSelect,
+  // 跨页选区相关
+  crossPageSelection,
+  onCrossPageSelectionChange,
+  onGlobalMouseDown,
+  onGlobalMouseMove,
+  onGlobalMouseUp
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [layout, setLayout] = useState<PageTextLayout | null>(null);
   const [anchor, setAnchor] = useState<number | null>(null);
   const [focus, setFocus] = useState<number | null>(null);
   const [isSelecting, setIsSelecting] = useState(false);
+  const [hasMouseMoved, setHasMouseMoved] = useState(false);
 
   // 加载页面文本布局
   const loadLayout = useCallback(async () => {
@@ -113,10 +128,48 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
 
   // 计算高亮矩形
   const highlightRects = useMemo(() => {
-    if (!layout || anchor === null || focus === null) return [];
+    if (!layout) return [];
 
-    const start = Math.max(0, Math.min(anchor, focus));
-    const end   = Math.min(layout.chars.length - 1, Math.max(anchor, focus));
+    // 确定当前页面的选区范围
+    let start: number, end: number;
+
+    // 优先使用跨页选区状态
+    if (crossPageSelection) {
+      const { startPage, endPage, startCharIndex, endCharIndex, isSelecting } = crossPageSelection;
+      
+      // 跨页选区总是显示（无论是否正在选择）
+      // 但如果是同一页且字符相同且正在选择，则不显示（避免单击显示）
+      if (isSelecting && startPage === endPage && startCharIndex === endCharIndex && startPage === pageIndex) {
+        return [];
+      }
+      
+      if (pageIndex < startPage || pageIndex > endPage) {
+        // 当前页面不在选区范围内
+        return [];
+      } else if (pageIndex === startPage && pageIndex === endPage) {
+        // 选区在同一页面内
+        start = Math.max(0, Math.min(startCharIndex, endCharIndex));
+        end = Math.min(layout.chars.length - 1, Math.max(startCharIndex, endCharIndex));
+      } else if (pageIndex === startPage) {
+        // 选区起始页：从起始字符到页面末尾
+        start = Math.max(0, startCharIndex);
+        end = layout.chars.length - 1;
+      } else if (pageIndex === endPage) {
+        // 选区结束页：从页面开始到结束字符
+        start = 0;
+        end = Math.min(layout.chars.length - 1, endCharIndex);
+      } else {
+        // 选区中间页：整页选中
+        start = 0;
+        end = layout.chars.length - 1;
+      }
+    } else if (anchor !== null && focus !== null && (hasMouseMoved || !isSelecting)) {
+      // 使用本地选区状态：正在拖拽且已移动，或选择已完成
+      start = Math.max(0, Math.min(anchor, focus));
+      end = Math.min(layout.chars.length - 1, Math.max(anchor, focus));
+    } else {
+      return [];
+    }
 
     // —— 工具：字符包围盒转像素矩形 + 行聚类 + X方向合并 ——
     // 计算一次就好：与缩放相关的像素级 padding
@@ -234,7 +287,7 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
     // 跨行时，按 y 再排序一下，渲染会更自然
     rects.sort((a, b) => a.y0 - b.y0);
     return rects;
-  }, [layout, anchor, focus, scale, pageHeightPt]);
+  }, [layout, anchor, focus, scale, pageHeightPt, crossPageSelection, pageIndex, hasMouseMoved, isSelecting]);
 
   // 绘制选区高亮 - 使用一次性填充避免透明叠加
   const paintSelection = useCallback(() => {
@@ -280,6 +333,11 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (!layout) return;
     
+    // 清除之前的跨页选区
+    if (crossPageSelection) {
+      onCrossPageSelectionChange(null);
+    }
+    
     const { x, y } = getCanvasXY(e);
     const idx = hitCharIndex(x, y);
     
@@ -287,12 +345,19 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
       setAnchor(idx);
       setFocus(idx);
       setIsSelecting(true);
+      setHasMouseMoved(false); // 重置移动标志
+      onGlobalMouseDown?.(pageIndex, idx);
     }
     
     e.preventDefault();
-  }, [layout, getCanvasXY, hitCharIndex]);
+  }, [layout, getCanvasXY, hitCharIndex, pageIndex, onGlobalMouseDown, crossPageSelection, onCrossPageSelectionChange]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    // 如果有跨页选区正在进行，不处理本地鼠标移动
+    if (crossPageSelection?.isSelecting) return;
+    
+    // 只有在正在选择状态下才处理鼠标移动
+    // 如果选择已完成（isSelecting=false），不再响应鼠标移动
     if (!isSelecting || anchor === null) return;
     
     const { x, y } = getCanvasXY(e);
@@ -300,16 +365,39 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
     
     if (idx !== null) {
       setFocus(idx);
+      setHasMouseMoved(true); // 标记鼠标已移动
+      onGlobalMouseMove?.(pageIndex, idx, pageIndex, anchor); // 传递起始位置
     }
     
     e.preventDefault();
-  }, [isSelecting, anchor, getCanvasXY, hitCharIndex]);
+  }, [isSelecting, anchor, getCanvasXY, hitCharIndex, pageIndex, onGlobalMouseMove, crossPageSelection]);
 
   const handleMouseUp = useCallback(async (e: React.MouseEvent) => {
+    // 如果有跨页选区正在进行，交给全局处理
+    if (crossPageSelection?.isSelecting) {
+      // 重置本地状态
+      setIsSelecting(false);
+      setHasMouseMoved(false);
+      onGlobalMouseUp?.();
+      return;
+    }
+    
     if (!isSelecting || anchor === null || focus === null || !layout) {
       setAnchor(null);
       setFocus(null);
       setIsSelecting(false);
+      setHasMouseMoved(false);
+      onGlobalMouseUp?.();
+      return;
+    }
+    
+    // 如果鼠标没有移动（单纯点击），不进行选择
+    if (!hasMouseMoved) {
+      setAnchor(null);
+      setFocus(null);
+      setIsSelecting(false);
+      setHasMouseMoved(false);
+      onGlobalMouseUp?.();
       return;
     }
     
@@ -321,7 +409,7 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
     
     if (text.trim()) {
       try {
-        await navigator.clipboard.writeText(text);
+        await writeText(text);
         console.log('文本已复制到剪贴板:', text);
         onTextSelect?.(text);
       } catch (error) {
@@ -331,19 +419,48 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
     }
     
     setIsSelecting(false);
-    // 保留选区高亮，如果想清除选区，取消注释下面两行
-    // setAnchor(null);
-    // setFocus(null);
+    setHasMouseMoved(false);
+    onGlobalMouseUp?.();
     
     e.preventDefault();
-  }, [isSelecting, anchor, focus, layout, onTextSelect]);
+  }, [isSelecting, anchor, focus, layout, onTextSelect, onGlobalMouseUp, crossPageSelection]);
 
   // 清除选区
   const clearSelection = useCallback(() => {
     setAnchor(null);
     setFocus(null);
     setIsSelecting(false);
-  }, []);
+    setHasMouseMoved(false);
+    onCrossPageSelectionChange(null); // 清除跨页选区
+  }, [onCrossPageSelectionChange]);
+
+  // 跨页鼠标移动事件监听
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+        const handleCrossPageMouseMove = (e: CustomEvent) => {
+      const { pageIndex: eventPageIndex, x, y } = e.detail;
+      
+      // 只有在跨页选区正在进行时才处理
+      if (!crossPageSelection?.isSelecting) return;
+      
+      if (eventPageIndex === pageIndex && layout) {
+        // 当前页面收到跨页鼠标移动事件
+        const idx = hitCharIndex(x, y);
+        if (idx !== null) {
+          setHasMouseMoved(true); // 标记鼠标已移动
+          // 对于跨页事件，不传递起始位置，因为起始位置在另一个页面
+          onGlobalMouseMove?.(pageIndex, idx);
+        }
+      }
+    };
+
+    canvas.addEventListener('crossPageMouseMove', handleCrossPageMouseMove as EventListener);
+    return () => {
+      canvas.removeEventListener('crossPageMouseMove', handleCrossPageMouseMove as EventListener);
+    };
+  }, [pageIndex, layout, hitCharIndex, onGlobalMouseMove, crossPageSelection]);
 
   // 键盘事件：Escape 清除选区
   useEffect(() => {

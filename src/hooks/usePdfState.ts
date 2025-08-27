@@ -6,6 +6,14 @@ import {
   TileState 
 } from '../types/pdf';
 
+export interface CrossPageSelection {
+  startPage: number;
+  endPage: number;
+  startCharIndex: number;
+  endCharIndex: number;
+  isSelecting: boolean;
+}
+
 export const usePdfState = () => {
   const [pdfMetadata, setPdfMetadata] = useState<PdfMetadata | null>(null);
   const [viewState, setViewState] = useState<ViewState>({
@@ -18,6 +26,8 @@ export const usePdfState = () => {
   const [lastScrollY, setLastScrollY] = useState(0);
   const [pagePosterStates, setPagePosterStates] = useState<Map<string, PagePosterState>>(new Map());
   const [tileStates, setTileStates] = useState<Map<string, TileState>>(new Map());
+  // 跨页选区状态
+  const [crossPageSelection, setCrossPageSelection] = useState<CrossPageSelection | null>(null);
 
   // 获取页面海报图状态
   const getPagePosterState = useCallback((key: string): PagePosterState => {
@@ -56,6 +66,7 @@ export const usePdfState = () => {
     setViewState({ scale: 1.0, scrollY: 0 });
     setCurrentVisiblePage(0);
     setLastScrollY(0);
+    setCrossPageSelection(null);
   }, []);
 
   return {
@@ -74,6 +85,10 @@ export const usePdfState = () => {
     setLastScrollY,
     pagePosterStates,
     tileStates,
+    
+    // 跨页选区
+    crossPageSelection,
+    setCrossPageSelection,
     
     // 方法
     getPagePosterState,

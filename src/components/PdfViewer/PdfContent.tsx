@@ -1,10 +1,13 @@
 import React, { useCallback, useRef, useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { 
   PdfMetadata, 
   ViewState, 
   PageLayout, 
   TileInfo,
-  TILE_SIZE 
+  TILE_SIZE,
+  PageTextLayout
 } from '../../types/pdf';
 import { usePdfState } from '../../hooks/usePdfState';
 import { getVisiblePages, getExpandedVisiblePages } from '../../utils/pdfLayout';
@@ -394,6 +397,168 @@ export const PdfContent: React.FC<PdfContentProps> = ({
   const [imageCache, setImageCache] = useState<ImageCache>({});
   const [needsRedraw, setNeedsRedraw] = useState(false);
   const [selectedText, setSelectedText] = useState<string>('');
+  
+  const { crossPageSelection, setCrossPageSelection } = pdfState;
+
+  // 跨页选区处理函数
+  const handleGlobalMouseDown = useCallback((pageIndex: number, charIndex: number) => {
+    // 先不创建跨页选区，等到鼠标移动时再创建
+    // 这样可以避免单纯点击时显示选区
+  }, []);
+
+  const handleGlobalMouseMove = useCallback((pageIndex: number, charIndex: number, startPageIndex?: number, startCharIndex?: number) => {
+    if (crossPageSelection?.isSelecting) {
+      setCrossPageSelection({
+        ...crossPageSelection,
+        endPage: pageIndex,
+        endCharIndex: charIndex
+      });
+    } else if (startPageIndex !== undefined && startCharIndex !== undefined) {
+      // 第一次移动，创建跨页选区
+      setCrossPageSelection({
+        startPage: startPageIndex,
+        endPage: pageIndex,
+        startCharIndex: startCharIndex,
+        endCharIndex: charIndex,
+        isSelecting: true
+      });
+    }
+  }, [crossPageSelection, setCrossPageSelection]);
+
+  const handleGlobalMouseUp = useCallback(async () => {
+    if (!crossPageSelection?.isSelecting) return;
+
+    // 提取跨页选中的文本
+    try {
+      const selectedText = await extractCrossPageText(
+        pdfMetadata.id,
+        crossPageSelection.startPage,
+        crossPageSelection.endPage,
+        crossPageSelection.startCharIndex,
+        crossPageSelection.endCharIndex
+      );
+
+      if (selectedText.trim()) {
+        try {
+          await writeText(selectedText);
+          console.log('跨页文本已复制到剪贴板:', selectedText);
+          setSelectedText(selectedText);
+        } catch (error) {
+          console.error('复制到剪贴板失败:', error);
+          setSelectedText(selectedText);
+        }
+      }
+    } catch (error) {
+      console.error('提取跨页文本失败:', error);
+    }
+
+    // 结束选择状态，但保持选区高亮
+    setCrossPageSelection({
+      ...crossPageSelection,
+      isSelecting: false
+    });
+  }, [crossPageSelection, setCrossPageSelection, pdfMetadata.id]);
+
+  // 提取跨页文本的辅助函数
+  const extractCrossPageText = async (
+    pdfId: string,
+    startPage: number,
+    endPage: number,
+    startCharIndex: number,
+    endCharIndex: number
+  ): Promise<string> => {
+    const textParts: string[] = [];
+
+    for (let page = startPage; page <= endPage; page++) {
+      try {
+        const pageTextLayout = await invoke<PageTextLayout>('get_page_text_layout', {
+          id: pdfId,
+          page
+        });
+
+        let pageStart = 0;
+        let pageEnd = pageTextLayout.chars.length - 1;
+
+        if (page === startPage) {
+          pageStart = Math.max(0, startCharIndex);
+        }
+        if (page === endPage) {
+          pageEnd = Math.min(pageTextLayout.chars.length - 1, endCharIndex);
+        }
+
+        const pageText = pageTextLayout.chars
+          .slice(pageStart, pageEnd + 1)
+          .map(c => c.ch)
+          .join('');
+
+        if (pageText.trim()) {
+          textParts.push(pageText);
+        }
+      } catch (error) {
+        console.error(`获取页面 ${page} 文本布局失败:`, error);
+      }
+    }
+
+    return textParts.join('\n');
+  };
+
+  // 全局鼠标事件监听 - 用于跨页选区
+  useEffect(() => {
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      if (!crossPageSelection?.isSelecting) return;
+
+      // 找到鼠标当前所在的页面
+      const elements = document.elementsFromPoint(e.clientX, e.clientY);
+      const textLayerCanvas = elements.find(el => el.classList.contains('pdf-text-layer')) as HTMLCanvasElement;
+      
+      if (textLayerCanvas) {
+        // 从canvas的data属性或其他方式获取页面索引
+        const pageContainer = textLayerCanvas.closest('[data-page-index]') as HTMLElement;
+        if (pageContainer) {
+          const pageIndex = parseInt(pageContainer.getAttribute('data-page-index') || '0');
+          
+          // 计算相对于canvas的坐标
+          const rect = textLayerCanvas.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const y = e.clientY - rect.top;
+          
+          // 触发该页面的字符命中测试
+          const event = new CustomEvent('crossPageMouseMove', {
+            detail: { pageIndex, x, y }
+          });
+          textLayerCanvas.dispatchEvent(event);
+        }
+      }
+    };
+
+    const handleDocumentMouseUp = (e: MouseEvent) => {
+      if (crossPageSelection?.isSelecting) {
+        handleGlobalMouseUp();
+      }
+    };
+
+    if (crossPageSelection?.isSelecting) {
+      document.addEventListener('mousemove', handleGlobalMouseMove);
+      document.addEventListener('mouseup', handleDocumentMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleGlobalMouseMove);
+      document.removeEventListener('mouseup', handleDocumentMouseUp);
+    };
+  }, [crossPageSelection, handleGlobalMouseUp]);
+
+  // 键盘事件：Escape 清除跨页选区
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setCrossPageSelection(null);
+      }
+    };
+    
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [setCrossPageSelection]);
 
   // 获取可见页面
   const visiblePages = React.useMemo(() => {
@@ -452,6 +617,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
         return (
           <div
             key={`text-layer-${pageLayout.pageIndex}`}
+            data-page-index={pageLayout.pageIndex}
             style={{
               position: 'absolute',
               left: `${pageX}px`,
@@ -473,13 +639,18 @@ export const PdfContent: React.FC<PdfContentProps> = ({
                 console.log('选中文本:', text);
                 setSelectedText(text);
               }}
+              crossPageSelection={crossPageSelection}
+              onCrossPageSelectionChange={setCrossPageSelection}
+              onGlobalMouseDown={handleGlobalMouseDown}
+              onGlobalMouseMove={handleGlobalMouseMove}
+              onGlobalMouseUp={handleGlobalMouseUp}
             />
           </div>
                  );
        })}
        
       {/* 选中文本状态显示 */}
-      {selectedText && (
+      {(selectedText || crossPageSelection) && (
         <div
           style={{
             position: 'fixed',
@@ -495,9 +666,19 @@ export const PdfContent: React.FC<PdfContentProps> = ({
             zIndex: 1000,
             fontFamily: 'monospace',
           }}
-          onClick={() => setSelectedText('')}
+          onClick={() => {
+            setSelectedText('');
+            setCrossPageSelection(null);
+          }}
         >
-          已复制: {selectedText.length > 50 ? selectedText.substring(0, 50) + '...' : selectedText}
+          {crossPageSelection?.isSelecting
+            ? `选择中... (页面 ${crossPageSelection.startPage + 1} - ${crossPageSelection.endPage + 1})`
+            : selectedText
+            ? `已复制: ${selectedText.length > 50 ? selectedText.substring(0, 50) + '...' : selectedText}`
+            : crossPageSelection
+            ? `已选择跨页文本 (页面 ${crossPageSelection.startPage + 1} - ${crossPageSelection.endPage + 1})`
+            : ''
+          }
         </div>
       )}
     </div>
