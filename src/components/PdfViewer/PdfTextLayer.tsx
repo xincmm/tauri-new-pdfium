@@ -118,9 +118,10 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
     const start = Math.max(0, Math.min(anchor, focus));
     const end   = Math.min(layout.chars.length - 1, Math.max(anchor, focus));
 
-    // —— 工具：字符包围盒转像素矩形 + 行聚类 ——
+    // —— 工具：字符包围盒转像素矩形 + 行聚类 + X方向合并 ——
     // 计算一次就好：与缩放相关的像素级 padding
     const padPx = Math.max(1, Math.round(scaleFactor(scale) * 0.3));
+    const gapEps = Math.max(6, Math.round(scaleFactor(scale) * 8)); // X方向合并阈值，足够跨越单词间空格
 
     type PxBox = {
       x0: number; x1: number; y0: number; y1: number;
@@ -128,10 +129,11 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
     };
 
     function charToPxBox(ch: CharBoxPt, pageHpt: number, scale: number): PxBox {
-      let x0 = ptXToPx(ch.left, scale);
-      let x1 = ptXToPx(ch.right, scale);
-      let yTop = ptYToPx(ch.top, pageHpt, scale);      // 翻转后：小的是更"上"
-      let yBot = ptYToPx(ch.bottom, pageHpt, scale);
+      // 统一取整策略：left/top向下取整，right/bottom向上取整
+      let x0 = Math.floor(ptXToPx(ch.left, scale));
+      let x1 = Math.ceil(ptXToPx(ch.right, scale));
+      let yTop = Math.floor(ptYToPx(ch.top, pageHpt, scale));
+      let yBot = Math.ceil(ptYToPx(ch.bottom, pageHpt, scale));
       if (yTop > yBot) [yTop, yBot] = [yBot, yTop];
       const h = yBot - yTop;
       return { x0, x1, y0: yTop, y1: yBot, h, cy: yTop + h / 2, idx: ch.idx };
@@ -169,30 +171,72 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
       return rows;
     }
 
+    // X方向区间合并：将同一行内相邻或有小间隙的字符框合并成连续条带
+    function mergeLineSegments(boxes: PxBox[], gapThreshold: number): { x0: number; x1: number; y0: number; y1: number }[] {
+      if (boxes.length === 0) return [];
+      
+      const segments: { x0: number; x1: number; y0: number; y1: number }[] = [];
+      let current = {
+        x0: boxes[0].x0,
+        x1: boxes[0].x1,
+        y0: boxes[0].y0,
+        y1: boxes[0].y1
+      };
+
+      for (let i = 1; i < boxes.length; i++) {
+        const box = boxes[i];
+        const gap = box.x0 - current.x1;
+        
+        if (gap <= gapThreshold) {
+          // 合并到当前段：扩展X范围，Y取最大包围
+          current.x1 = Math.max(current.x1, box.x1);
+          current.y0 = Math.min(current.y0, box.y0);
+          current.y1 = Math.max(current.y1, box.y1);
+        } else {
+          // 间隙太大，结束当前段，开始新段
+          segments.push(current);
+          current = {
+            x0: box.x0,
+            x1: box.x1,
+            y0: box.y0,
+            y1: box.y1
+          };
+        }
+      }
+      segments.push(current);
+      
+      return segments;
+    }
+
     // 仅取被选中的字符 -> 像素盒
     const selected: PxBox[] = [];
     for (let i = start; i <= end; i++) {
       selected.push(charToPxBox(layout.chars[i], pageHeightPt, scale));
     }
 
-    // 按垂直重叠聚成"行"，每行整段合并
+    // 按垂直重叠聚成"行"
     const rows = groupIntoRows(selected, 0.6);
 
-    // 输出：一行用"首字符左 → 末字符右；行内最高高度"的整块
-    const rects = rows.map(r => {
-      const x0 = r.items[0].x0 - padPx;
-      const x1 = r.items[r.items.length - 1].x1 + padPx;
-      const y0 = r.y0 - Math.ceil(padPx * 0.2);
-      const y1 = r.y1 + Math.ceil(padPx * 0.2);
-      return { x0, y0, x1, y1 };
-    });
+    // 每行内做X方向合并，生成连续条带
+    const rects: { x0: number; y0: number; x1: number; y1: number }[] = [];
+    for (const row of rows) {
+      const segments = mergeLineSegments(row.items, gapEps);
+      for (const seg of segments) {
+        rects.push({
+          x0: seg.x0 - padPx,
+          y0: seg.y0 - Math.ceil(padPx * 0.2),
+          x1: seg.x1 + padPx,
+          y1: seg.y1 + Math.ceil(padPx * 0.2)
+        });
+      }
+    }
 
     // 跨行时，按 y 再排序一下，渲染会更自然
     rects.sort((a, b) => a.y0 - b.y0);
     return rects;
   }, [layout, anchor, focus, scale, pageHeightPt]);
 
-  // 绘制选区高亮
+  // 绘制选区高亮 - 使用一次性填充避免透明叠加
   const paintSelection = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -202,10 +246,15 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
     
     if (!highlightRects.length) return;
     
+    // 一次性填充所有矩形，避免透明叠加
+    ctx.save();
     ctx.fillStyle = 'rgba(0, 120, 215, 0.30)'; // 选区蓝
+    ctx.beginPath();
     for (const r of highlightRects) {
-      ctx.fillRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
+      ctx.rect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0);
     }
+    ctx.fill(); // 只填充一次
+    ctx.restore();
   }, [highlightRects]);
 
   useEffect(() => {
