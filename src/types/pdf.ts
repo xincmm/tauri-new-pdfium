@@ -6,6 +6,21 @@ export interface PdfMetadata {
   page_dims: [number, number][];
 }
 
+export interface CharBoxPt {
+  idx: number;
+  ch: string;
+  left: number; 
+  top: number; 
+  right: number; 
+  bottom: number; // pt 坐标
+}
+
+export interface PageTextLayout {
+  width_pt: number;
+  height_pt: number;
+  chars: CharBoxPt[];
+}
+
 export interface TileInfo {
   id: string;
   page: number;
@@ -38,6 +53,7 @@ export interface TileState {
 
 // 常量定义
 export const TILE_SIZE = 512;
+export const BASE_DPI = 144; // 与后端一致
 export const MIN_SCALE = 0.1;
 export const MAX_SCALE = 5.0;
 export const PAGE_MARGIN = 20; // 页面间距

@@ -57,6 +57,41 @@ pub struct PdfMetadata {
     page_dims: Vec<(f32, f32)>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TextItem {
+    text: String,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    font_size: f32,
+    font_name: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PageTextContent {
+    page: u32,
+    text_items: Vec<TextItem>,
+}
+
+// 单字符的包围盒（单位 pt）
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CharBox {
+    pub idx: u32,     // 在该页文本流里的顺序索引
+    pub ch: String,   // 单字符（可能是空格/连字符等）
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PageTextLayout {
+    pub width_pt: f32,
+    pub height_pt: f32,
+    pub chars: Vec<CharBox>,
+}
+
 // 全局状态，存储 Pdfium 库的路径
 pub struct PdfiumLibraryPath(pub String);
 
@@ -140,6 +175,150 @@ async fn open_pdf(
 
     println!("🎉 PDF 处理完成，返回元数据");
     Ok(metadata)
+}
+
+#[tauri::command]
+async fn get_page_text_layout(
+    id: String,
+    page: u32,
+    state: tauri::State<'_, PdfiumLibraryPath>,
+) -> Result<PageTextLayout, String> {
+    println!("📐 获取页面文本布局: id={}, page={}", id, page);
+
+    // 获取文档数据
+    let data_arc = DOCS
+        .lock()
+        .get(&id)
+        .ok_or_else(|| "doc not found".to_string())?
+        .clone();
+
+    let (w_pt, h_pt) = data_arc.page_dims[page as usize];
+    let data_bytes = data_arc.bytes.clone();
+    
+    // 在spawn_blocking中执行CPU密集型的Pdfium操作
+    let layout = tauri::async_runtime::spawn_blocking(move || -> Result<PageTextLayout, String> {
+        // 重新绑定Pdfium库
+        let library_path = if cfg!(target_os = "macos") {
+            "sidecars/libpdfium.dylib-aarch64-apple-darwin"
+        } else if cfg!(target_os = "windows") {
+            "sidecars/pdfium.dll"
+        } else {
+            "sidecars/libpdfium.so"
+        };
+
+        let bindings = Pdfium::bind_to_library(library_path)
+            .or_else(|_| Pdfium::bind_to_system_library())
+            .map_err(|e| format!("Failed to bind Pdfium library: {}", e))?;
+        let pdfium = Pdfium::new(bindings);
+
+        let doc = pdfium.load_pdf_from_byte_slice(&data_bytes, None)
+            .map_err(|e| format!("Failed to load PDF: {}", e))?;
+
+        let pdf_page = doc.pages().get(page as u16)
+            .map_err(|e| format!("Page out of range: {}", e))?;
+
+        // 获取页面文本对象
+        let mut chars = Vec::new();
+        
+        // 使用 Pdfium 的文本提取功能
+        if let Ok(text_page) = pdf_page.text() {
+            let char_count = text_page.chars().len();
+            println!("📝 页面 {} 包含 {} 个字符", page, char_count);
+
+            // 遍历所有字符，提取位置信息
+            for (i, char_obj) in text_page.chars().iter().enumerate() {
+                let char_text = char_obj.unicode_char().unwrap_or(' ').to_string();
+                
+                // 获取字符的边界框
+                if let Ok(bounds) = char_obj.loose_bounds() {
+                    chars.push(CharBox {
+                        idx: i as u32,
+                        ch: char_text,
+                        left: bounds.left().value,
+                        top: bounds.top().value,
+                        right: bounds.right().value,
+                        bottom: bounds.bottom().value,
+                    });
+                }
+            }
+
+            println!("✅ 提取到 {} 个字符框", chars.len());
+        } else {
+            println!("⚠️ 无法获取页面文本对象");
+        }
+
+        Ok(PageTextLayout {
+            width_pt: w_pt,
+            height_pt: h_pt,
+            chars,
+        })
+    }).await.map_err(|e| format!("Task join error: {}", e))??;
+
+    println!("🎉 页面文本布局提取完成");
+    Ok(layout)
+}
+
+/// （可选）按字符区间提词（若想后端做规范化则可用）
+#[tauri::command]
+async fn extract_text_range(
+    id: String,
+    page: u32,
+    start: u32,
+    end: u32,
+    state: tauri::State<'_, PdfiumLibraryPath>,
+) -> Result<String, String> {
+    println!("📝 提取文本范围: id={}, page={}, start={}, end={}", id, page, start, end);
+
+    // 获取文档数据
+    let data_arc = DOCS
+        .lock()
+        .get(&id)
+        .ok_or_else(|| "doc not found".to_string())?
+        .clone();
+
+    let data_bytes = data_arc.bytes.clone();
+    
+    // 在spawn_blocking中执行CPU密集型的Pdfium操作
+    let text = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        // 重新绑定Pdfium库
+        let library_path = if cfg!(target_os = "macos") {
+            "sidecars/libpdfium.dylib-aarch64-apple-darwin"
+        } else if cfg!(target_os = "windows") {
+            "sidecars/pdfium.dll"
+        } else {
+            "sidecars/libpdfium.so"
+        };
+
+        let bindings = Pdfium::bind_to_library(library_path)
+            .or_else(|_| Pdfium::bind_to_system_library())
+            .map_err(|e| format!("Failed to bind Pdfium library: {}", e))?;
+        let pdfium = Pdfium::new(bindings);
+
+        let doc = pdfium.load_pdf_from_byte_slice(&data_bytes, None)
+            .map_err(|e| format!("Failed to load PDF: {}", e))?;
+
+        let pdf_page = doc.pages().get(page as u16)
+            .map_err(|e| format!("Page out of range: {}", e))?;
+
+        // 获取页面文本对象
+        let mut result = String::new();
+        
+        // 使用 Pdfium 的文本提取功能
+        if let Ok(text_page) = pdf_page.text() {
+            // 遍历指定范围的字符
+            for (i, char_obj) in text_page.chars().iter().enumerate() {
+                let idx = i as u32;
+                if idx >= start && idx <= end {
+                    result.push(char_obj.unicode_char().unwrap_or(' '));
+                }
+            }
+        }
+
+        Ok(result)
+    }).await.map_err(|e| format!("Task join error: {}", e))??;
+
+    println!("🎉 文本范围提取完成，长度: {}", text.len());
+    Ok(text)
 }
 
 // 获取或创建页面图像（异步版本，利用thread_safe特性）
@@ -363,7 +542,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![open_pdf])
+        .invoke_handler(tauri::generate_handler![
+            open_pdf, 
+            get_page_text_layout, 
+            extract_text_range
+        ])
         .setup(|app| {
             use tauri::path::BaseDirectory;
 
