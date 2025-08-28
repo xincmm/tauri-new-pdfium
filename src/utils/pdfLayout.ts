@@ -7,7 +7,7 @@ export const calculatePageLayouts = (
 ): PageLayout[] => {
   if (!pdfMetadata) return [];
   
-  const baseDpi = 150.0;
+  const baseDpi = 96.0;
   const layouts: PageLayout[] = [];
   let currentY = PAGE_MARGIN;
   

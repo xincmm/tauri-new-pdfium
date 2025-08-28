@@ -122,7 +122,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
       expandedVisiblePages.forEach(pageLayout => {
         const { pageIndex } = pageLayout;
         const [pageWidthPt, pageHeightPt] = pdfMetadata.page_dims[pageIndex];
-        const baseDpi = 150.0;
+        const baseDpi = 96.0;
         const scale = viewState.scale;
         const effectiveDpi = baseDpi * scale;
         

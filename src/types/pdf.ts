@@ -68,18 +68,18 @@ export interface PageRenderState {
 
 // 常量定义
 export const TILE_SIZE = 512;
-export const BASE_DPI = 150; // 与后端一致
-export const DEFAULT_SCALE = 0.65; // 默认缩放比例
+export const BASE_DPI = 96; // 与后端一致
+export const DEFAULT_SCALE = 1; // 默认缩放比例
 export const MIN_SCALE = 0.1;
 export const MAX_SCALE = 5.0;
 export const PAGE_MARGIN = 20; // 页面间距
-export const SCROLL_DEBOUNCE_MS = 150; // 滚动停止后的延迟时间
+export const SCROLL_DEBOUNCE_MS = 96; // 滚动停止后的延迟时间
 
 // 新的渲染桶策略常量
 export const BUCKET_STRATEGY = {
   TARGET_FACTOR: 1.0,        // 目标桶倍数（1:1像素对齐）
   HIGHER_FACTOR: 1.2,        // 更清一档倍数（占位用）
-  LOWER_FACTOR: 0.8,         // 备用低清倍数
+  LOWER_FACTOR: 0.6,         // 备用低清倍数
   FADE_DELAY_MS: 140,        // 静止后淡入延迟时间
   FADE_DURATION_MS: 200,     // 淡入动画时长
 } as const;
