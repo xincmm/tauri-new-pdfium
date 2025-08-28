@@ -30,9 +30,35 @@ interface PdfContentProps {
   pdfState: ReturnType<typeof usePdfState>;
 }
 
-// 图像缓存接口
-interface ImageCache {
-  [key: string]: HTMLImageElement;
+// 瓦片加载并发控制
+const MAX_CONCURRENCY = 8;
+const loadQueue: Array<() => Promise<void>> = [];
+let runningTasks = 0;
+
+function scheduleLoad(task: () => Promise<void>) {
+  loadQueue.push(task);
+  pumpQueue();
+}
+
+function pumpQueue() {
+  while (runningTasks < MAX_CONCURRENCY && loadQueue.length > 0) {
+    const task = loadQueue.shift()!;
+    runningTasks++;
+    task().finally(() => {
+      runningTasks--;
+      pumpQueue();
+    });
+  }
+}
+
+// 瓦片几何信息缓存接口
+interface TileGeometry {
+  tx: number;
+  ty: number;
+  tileX: number;
+  tileY: number;
+  renderWidth: number;
+  renderHeight: number;
 }
 
 // 单页 Canvas 组件
@@ -44,10 +70,9 @@ interface PageCanvasProps {
   lastScrollY: number;
   isScrolling: boolean;
   devicePixelRatio: number;
-  imageCache: ImageCache;
-  setImageCache: React.Dispatch<React.SetStateAction<ImageCache>>;
+  bitmapCacheRef: React.MutableRefObject<Map<string, ImageBitmap>>;
+  inflightRef: React.MutableRefObject<Set<string>>;
   pdfState: ReturnType<typeof usePdfState>;
-  setNeedsRedraw: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 const PageCanvas: React.FC<PageCanvasProps> = ({
@@ -57,63 +82,80 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
   viewState,
   isScrolling,
   devicePixelRatio,
-  imageCache,
-  setImageCache,
+  bitmapCacheRef,
+  inflightRef,
   pdfState,
-  setNeedsRedraw,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const cacheCanvasRef = useRef<HTMLCanvasElement | null>(null); // 缓存canvas
+  const cacheCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const staticBackgroundRef = useRef<HTMLCanvasElement | null>(null);
   const lastRenderStateRef = useRef<{
     scale: number;
     devicePixelRatio: number;
     width: number;
     height: number;
   } | null>(null);
+  
+  // 瓦片几何信息缓存
+  const tileGeometryRef = useRef<TileGeometry[]>([]);
+  const lastTileScaleRef = useRef<number>(-1);
+  
+  // 重绘标志
+  const redrawFlag = useRef(false);
 
   // 缩放变化时重置渲染状态
   useEffect(() => {
     lastRenderStateRef.current = null;
+    lastTileScaleRef.current = -1;
   }, [viewState.scale]);
   
   const { 
-    getPagePosterState, 
-    updatePagePosterState, 
     getTileState, 
     updateTileState 
   } = pdfState;
 
   const { pageIndex, y: pageY, width: pageWidth, height: pageHeight } = pageLayout;
-  // 如果内容宽度大于容器宽度，说明需要横向滚动，页面靠左对齐
-  // 否则页面居中
   const pageX = containerWidth > pageWidth 
-    ? Math.max(20, (containerWidth - pageWidth) / 2)  // 居中
-    : 20;  // 靠左对齐，保持20px边距
+    ? Math.max(20, (containerWidth - pageWidth) / 2)
+    : 20;
 
-  // 加载图像并缓存
-  const loadImage = useCallback((url: string, key: string): Promise<HTMLImageElement> => {
-    return new Promise((resolve, reject) => {
-      // 检查缓存
-      if (imageCache[key]) {
-        resolve(imageCache[key]);
-        return;
-      }
-
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      
-      img.onload = () => {
-        setImageCache(prev => ({
-          ...prev,
-          [key]: img
-        }));
-        resolve(img);
-      };
-      
-      img.onerror = reject;
-      img.src = url;
+  // 请求重绘（只影响当前页面）
+  const requestRedraw = useCallback(() => {
+    if (redrawFlag.current) return;
+    redrawFlag.current = true;
+    requestAnimationFrame(() => {
+      redrawFlag.current = false;
+      drawPage();
     });
-  }, [imageCache, setImageCache]);
+  }, []);
+
+  // 加载 ImageBitmap
+  const loadBitmap = useCallback(async (url: string, key: string): Promise<ImageBitmap | null> => {
+    if (bitmapCacheRef.current.has(key)) {
+      return bitmapCacheRef.current.get(key)!;
+    }
+    
+    if (inflightRef.current.has(key)) {
+      return null; // 已在加载中
+    }
+    
+    inflightRef.current.add(key);
+    
+    try {
+      const response = await fetch(url, { cache: 'force-cache' });
+      const blob = await response.blob();
+      const bitmap = await createImageBitmap(blob);
+      
+      bitmapCacheRef.current.set(key, bitmap);
+      requestRedraw(); // 触发重绘
+      return bitmap;
+    } catch (error) {
+      console.warn('Failed to load bitmap:', key, error);
+      return null;
+    } finally {
+      inflightRef.current.delete(key);
+    }
+  }, [bitmapCacheRef, inflightRef, requestRedraw]);
 
   // 创建或获取缓存canvas
   const getCacheCanvas = useCallback(() => {
@@ -123,7 +165,60 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     return cacheCanvasRef.current;
   }, []);
 
-  // 检查是否需要重新渲染（而不是使用缓存）
+  // 创建或获取静态背景canvas
+  const getStaticBackgroundCanvas = useCallback(() => {
+    if (!staticBackgroundRef.current) {
+      staticBackgroundRef.current = document.createElement('canvas');
+    }
+    return staticBackgroundRef.current;
+  }, []);
+
+  // 预计算瓦片几何信息
+  const computeTileGeometry = useCallback(() => {
+    if (lastTileScaleRef.current === viewState.scale && tileGeometryRef.current.length > 0) {
+      return tileGeometryRef.current;
+    }
+
+    const [pageWidthPt, pageHeightPt] = pdfMetadata.page_dims[pageIndex];
+    const baseDpi = 150.0;
+    const scale = viewState.scale;
+    const effectiveDpi = baseDpi * scale;
+    
+    const wPx = Math.ceil((pageWidthPt / 72.0) * effectiveDpi);
+    const hPx = Math.ceil((pageHeightPt / 72.0) * effectiveDpi);
+    
+    const dpiScale = effectiveDpi / baseDpi;
+    const backendTileSize = Math.round(TILE_SIZE * dpiScale);
+    
+    const endTileX = Math.ceil(wPx / backendTileSize);
+    const endTileY = Math.ceil(hPx / backendTileSize);
+
+    const geometry: TileGeometry[] = [];
+    
+    for (let tx = 0; tx < endTileX; tx++) {
+      for (let ty = 0; ty < endTileY; ty++) {
+        const tileX = (tx * backendTileSize) * (pageWidth / wPx);
+        const tileY = (ty * backendTileSize) * (pageHeight / hPx);
+        const renderWidth = Math.min(backendTileSize * (pageWidth / wPx), pageWidth - tileX);
+        const renderHeight = Math.min(backendTileSize * (pageHeight / hPx), pageHeight - tileY);
+        
+        geometry.push({
+          tx,
+          ty,
+          tileX,
+          tileY,
+          renderWidth,
+          renderHeight,
+        });
+      }
+    }
+    
+    tileGeometryRef.current = geometry;
+    lastTileScaleRef.current = viewState.scale;
+    return geometry;
+  }, [viewState.scale, pageWidth, pageHeight, pageIndex, pdfMetadata]);
+
+  // 检查是否需要重新渲染
   const needsFullRender = useCallback(() => {
     const currentState = {
       scale: viewState.scale,
@@ -153,17 +248,92 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     return false;
   }, [viewState.scale, devicePixelRatio, pageWidth, pageHeight]);
 
+  // 重建静态背景
+  const rebuildStaticBackground = useCallback(() => {
+    const staticCanvas = getStaticBackgroundCanvas();
+    const actualWidth = (pageWidth + 4) * devicePixelRatio;
+    const actualHeight = (pageHeight + 4) * devicePixelRatio;
+
+    if (staticCanvas.width !== actualWidth || staticCanvas.height !== actualHeight) {
+      staticCanvas.width = actualWidth;
+      staticCanvas.height = actualHeight;
+    }
+
+    const ctx = staticCanvas.getContext('2d', { alpha: false });
+    if (!ctx) return;
+
+    ctx.save();
+    ctx.clearRect(0, 0, actualWidth, actualHeight);
+    
+    // 页面背景
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, actualWidth, actualHeight);
+    
+    // 不绘制边框和阴影，保持简洁的白色背景
+    
+    // 页码
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    const pageNumX = (pageWidth - 56) * devicePixelRatio;
+    const pageNumY = (pageHeight + 8) * devicePixelRatio;
+    const pageNumWidth = 52 * devicePixelRatio;
+    const pageNumHeight = 20 * devicePixelRatio;
+    
+    const radius = 4 * devicePixelRatio;
+    ctx.beginPath();
+    ctx.moveTo(pageNumX + radius, pageNumY);
+    ctx.lineTo(pageNumX + pageNumWidth - radius, pageNumY);
+    ctx.quadraticCurveTo(pageNumX + pageNumWidth, pageNumY, pageNumX + pageNumWidth, pageNumY + radius);
+    ctx.lineTo(pageNumX + pageNumWidth, pageNumY + pageNumHeight - radius);
+    ctx.quadraticCurveTo(pageNumX + pageNumWidth, pageNumY + pageNumHeight, pageNumX + pageNumWidth - radius, pageNumY + pageNumHeight);
+    ctx.lineTo(pageNumX + radius, pageNumY + pageNumHeight);
+    ctx.quadraticCurveTo(pageNumX, pageNumY + pageNumHeight, pageNumX, pageNumY + pageNumHeight - radius);
+    ctx.lineTo(pageNumX, pageNumY + radius);
+    ctx.quadraticCurveTo(pageNumX, pageNumY, pageNumX + radius, pageNumY);
+    ctx.closePath();
+    ctx.fill();
+    
+    ctx.fillStyle = 'white';
+    ctx.font = `${12 * devicePixelRatio}px Arial`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(
+      `${pageIndex + 1}`,
+      pageNumX + pageNumWidth / 2,
+      pageNumY + pageNumHeight / 2
+    );
+    
+    ctx.restore();
+  }, [pageWidth, pageHeight, pageIndex, devicePixelRatio, getStaticBackgroundCanvas]);
+
+  // 绘制瓦片到缓存canvas
+  const paintTile = useCallback((
+    cacheCtx: CanvasRenderingContext2D,
+    bitmap: ImageBitmap,
+    tileX: number,
+    tileY: number,
+    renderWidth: number,
+    renderHeight: number
+  ) => {
+    cacheCtx.imageSmoothingEnabled = false;
+    cacheCtx.drawImage(
+      bitmap,
+      (tileX + 2) * devicePixelRatio,
+      (tileY + 2) * devicePixelRatio,
+      renderWidth * devicePixelRatio,
+      renderHeight * devicePixelRatio
+    );
+  }, [devicePixelRatio]);
+
   // 绘制单页内容
   const drawPage = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     if (!ctx) return;
 
-    // 设置 canvas 尺寸
-    const actualWidth = (pageWidth + 4) * devicePixelRatio; // +4 for border
-    const actualHeight = (pageHeight + 4) * devicePixelRatio; // +4 for border
+    const actualWidth = (pageWidth + 4) * devicePixelRatio;
+    const actualHeight = (pageHeight + 4) * devicePixelRatio;
 
     if (canvas.width !== actualWidth || canvas.height !== actualHeight) {
       canvas.width = actualWidth;
@@ -172,8 +342,9 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
       canvas.style.height = `${pageHeight + 4}px`;
     }
 
-    // 如果在滚动且有缓存，直接使用缓存
     const cacheCanvas = getCacheCanvas();
+    
+    // 滚动中直接使用缓存，早退
     if (isScrolling && cacheCanvas.width > 0 && !needsFullRender()) {
       ctx.clearRect(0, 0, actualWidth, actualHeight);
       ctx.drawImage(cacheCanvas, 0, 0);
@@ -184,200 +355,93 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     if (cacheCanvas.width !== actualWidth || cacheCanvas.height !== actualHeight) {
       cacheCanvas.width = actualWidth;
       cacheCanvas.height = actualHeight;
+      rebuildStaticBackground(); // 重建静态背景
     }
     
-    const cacheCtx = cacheCanvas.getContext('2d');
+    const cacheCtx = cacheCanvas.getContext('2d', { alpha: false });
     if (!cacheCtx) return;
 
-    // 清除画布
-    ctx.clearRect(0, 0, actualWidth, actualHeight);
-    cacheCtx.clearRect(0, 0, actualWidth, actualHeight);
+    // 确保静态背景存在并复制到缓存canvas
+    const staticCanvas = getStaticBackgroundCanvas();
+    if (staticCanvas.width === 0 || needsFullRender()) {
+      rebuildStaticBackground();
+    }
+    // 总是复制静态背景到缓存canvas
+    cacheCtx.drawImage(getStaticBackgroundCanvas(), 0, 0);
 
-    // 1. 绘制页面背景和边框
-    cacheCtx.save();
-    
-    // 页面背景
-    cacheCtx.fillStyle = 'white';
-    cacheCtx.fillRect(0, 0, actualWidth, actualHeight);
-    
-    // 页面边框
-    cacheCtx.strokeStyle = 'transparent';
-    cacheCtx.lineWidth = 2 * devicePixelRatio;
-    cacheCtx.strokeRect(
-      devicePixelRatio,
-      devicePixelRatio,
-      pageWidth * devicePixelRatio,
-      pageHeight * devicePixelRatio
-    );
-    
-    // 阴影效果
-    cacheCtx.fillStyle = '';
-    cacheCtx.fillRect(
-      3 * devicePixelRatio,
-      (pageHeight + 3) * devicePixelRatio,
-      pageWidth * devicePixelRatio,
-      devicePixelRatio
-    );
-    cacheCtx.fillRect(
-      (pageWidth + 3) * devicePixelRatio,
-      3 * devicePixelRatio,
-      devicePixelRatio,
-      pageHeight * devicePixelRatio
-    );
-    
-    cacheCtx.restore();
+    // 获取瓦片几何信息
+    const tileGeometry = computeTileGeometry();
 
-    // 2. 计算瓦片范围 - 基于页面的点坐标系统计算瓦片网格
-    // 将页面尺寸转换回点坐标，然后计算瓦片网格
-    const [pageWidthPt, pageHeightPt] = pdfMetadata.page_dims[pageIndex];
-    const baseDpi = 150.0;
-    const scale = viewState.scale;
-    const effectiveDpi = baseDpi * scale;
-    
-    // 页面在当前缩放下的像素尺寸（后端计算方式）
-    const wPx = Math.ceil((pageWidthPt / 72.0) * effectiveDpi);
-    const hPx = Math.ceil((pageHeightPt / 72.0) * effectiveDpi);
-    
-    // 后端的瓦片大小计算
-    const dpiScale = effectiveDpi / baseDpi;
-    const backendTileSize = Math.round(TILE_SIZE * dpiScale);
-    
-    // 计算瓦片网格
-    const startTileX = 0;
-    const endTileX = Math.ceil(wPx / backendTileSize);
-    const startTileY = 0;
-    const endTileY = Math.ceil(hPx / backendTileSize);
+    // 绘制瓦片（增量更新）
+    for (const tile of tileGeometry) {
+      const { tx, ty, tileX, tileY, renderWidth, renderHeight } = tile;
+      
+      // 高清瓦片信息
+      const highResTileInfo: TileInfo = {
+        id: pdfMetadata.id,
+        page: pageIndex,
+        scale: Math.round(viewState.scale * 100) / 100,
+        tx,
+        ty,
+      };
+      
+      // 低清瓦片信息
+      const lowResTileInfo: TileInfo = {
+        id: pdfMetadata.id,
+        page: pageIndex,
+        scale: Math.round(viewState.scale * POSTER_SCALE_FACTOR * 100) / 100,
+        tx,
+        ty,
+      };
 
-    // 3. 绘制瓦片（先低清，再高清）
-    for (let tx = startTileX; tx < endTileX; tx++) {
-      for (let ty = startTileY; ty < endTileY; ty++) {
-        // 前端渲染坐标（基于实际页面显示尺寸）
-        const tileX = (tx * backendTileSize) * (pageWidth / wPx);
-        const tileY = (ty * backendTileSize) * (pageHeight / hPx);
-        const renderWidth = Math.min(backendTileSize * (pageWidth / wPx), pageWidth - tileX);
-        const renderHeight = Math.min(backendTileSize * (pageHeight / hPx), pageHeight - tileY);
+      const highResKey = `highres_${generateTileKey(highResTileInfo)}`;
+      const lowResKey = `lowres_${generateTileKey(lowResTileInfo)}`;
+      const highResTileState = getTileState(highResKey);
+      const lowResTileState = getTileState(lowResKey);
+      
+      const highResUrl = getTileUrl(highResTileInfo, devicePixelRatio, true);
+      const lowResUrl = getTileUrl(lowResTileInfo, devicePixelRatio, false);
 
-        // 高清瓦片信息
-        const highResTileInfo: TileInfo = {
-          id: pdfMetadata.id,
-          page: pageIndex,
-          scale: Math.round(viewState.scale * 100) / 100,
-          tx,
-          ty,
-        };
-        
-        // 低清瓦片信息（使用更低的缩放比例）
-        const lowResTileInfo: TileInfo = {
-          id: pdfMetadata.id,
-          page: pageIndex,
-          scale: Math.round(viewState.scale * POSTER_SCALE_FACTOR * 100) / 100,
-          tx,
-          ty,
-        };
+      // 优先绘制高清瓦片
+      const highResBitmap = bitmapCacheRef.current.get(highResKey);
+      const lowResBitmap = bitmapCacheRef.current.get(lowResKey);
 
-        // 为低清和高清瓦片生成不同的缓存key
-        const highResKey = `highres_${generateTileKey(highResTileInfo)}`;
-        const lowResKey = `lowres_${generateTileKey(lowResTileInfo)}`;
-        const highResTileState = getTileState(highResKey);
-        const lowResTileState = getTileState(lowResKey);
-        
-        const highResUrl = getTileUrl(highResTileInfo, devicePixelRatio, true);  // 高清
-        const lowResUrl = getTileUrl(lowResTileInfo, devicePixelRatio, false);   // 低清
+      if (highResBitmap && highResTileState.loaded) {
+        paintTile(cacheCtx, highResBitmap, tileX, tileY, renderWidth, renderHeight);
+      } else if (lowResBitmap && lowResTileState.loaded) {
+        cacheCtx.imageSmoothingEnabled = true; // 低清瓦片使用平滑缩放
+        paintTile(cacheCtx, lowResBitmap, tileX, tileY, renderWidth, renderHeight);
+        cacheCtx.imageSmoothingEnabled = false;
+      }
 
-        // 优先绘制高清瓦片，如果没有则绘制低清瓦片
-        if (imageCache[highResKey] && highResTileState.loaded) {
-          // 绘制高清瓦片
-          cacheCtx.save();
-          cacheCtx.imageSmoothingEnabled = false;
-          
-          cacheCtx.drawImage(
-            imageCache[highResKey],
-            (tileX + 2) * devicePixelRatio,
-            (tileY + 2) * devicePixelRatio,
-            renderWidth * devicePixelRatio,
-            renderHeight * devicePixelRatio
-          );
-          cacheCtx.restore();
-        } else if (imageCache[lowResKey] && lowResTileState.loaded) {
-          // 绘制低清瓦片作为占位
-          cacheCtx.save();
-          cacheCtx.imageSmoothingEnabled = true; // 低清瓦片使用平滑缩放
-          
-          cacheCtx.drawImage(
-            imageCache[lowResKey],
-            (tileX + 2) * devicePixelRatio,
-            (tileY + 2) * devicePixelRatio,
-            renderWidth * devicePixelRatio,
-            renderHeight * devicePixelRatio
-          );
-          cacheCtx.restore();
-        }
+      // 加载高清瓦片（非滚动时）
+      if (!highResTileState.loading && !highResBitmap && !isScrolling) {
+        updateTileState(highResKey, { loading: true });
+        scheduleLoad(async () => {
+          try {
+            await loadBitmap(highResUrl, highResKey);
+            updateTileState(highResKey, { loaded: true, loading: false });
+          } catch (error) {
+            console.warn('Failed to load high-res tile:', highResTileInfo);
+            updateTileState(highResKey, { loading: false });
+          }
+        });
+      }
 
-        // 加载高清瓦片
-        if (!highResTileState.loading && !imageCache[highResKey] && !isScrolling) {
-          updateTileState(highResKey, { loading: true });
-          loadImage(highResUrl, highResKey)
-            .then(() => {
-              updateTileState(highResKey, { loaded: true, loading: false });
-              setNeedsRedraw(true);
-            })
-            .catch(() => {
-              console.warn('Failed to load high-res tile:', highResTileInfo);
-              updateTileState(highResKey, { loading: false });
-            });
-        }
-
-        // 加载低清瓦片（如果高清瓦片还没有的话）
-        if (!imageCache[highResKey] && !lowResTileState.loading && !imageCache[lowResKey]) {
-          updateTileState(lowResKey, { loading: true });
-          loadImage(lowResUrl, lowResKey)
-            .then(() => {
-              updateTileState(lowResKey, { loaded: true, loading: false });
-              setNeedsRedraw(true);
-            })
-            .catch(() => {
-              console.warn('Failed to load low-res tile:', lowResTileInfo);
-              updateTileState(lowResKey, { loading: false });
-            });
-        }
+      // 加载低清瓦片
+      if (!highResBitmap && !lowResTileState.loading && !lowResBitmap) {
+        updateTileState(lowResKey, { loading: true });
+        scheduleLoad(async () => {
+          try {
+            await loadBitmap(lowResUrl, lowResKey);
+            updateTileState(lowResKey, { loaded: true, loading: false });
+          } catch (error) {
+            console.warn('Failed to load low-res tile:', lowResTileInfo);
+            updateTileState(lowResKey, { loading: false });
+          }
+        });
       }
     }
-
-    // 4. 绘制页码
-    cacheCtx.save();
-    cacheCtx.fillStyle = 'rgba(0,0,0,0.7)';
-    const pageNumX = (pageWidth - 56) * devicePixelRatio;
-    const pageNumY = (pageHeight + 8) * devicePixelRatio;
-    const pageNumWidth = 52 * devicePixelRatio;
-    const pageNumHeight = 20 * devicePixelRatio;
-    
-    // 页码背景
-    const radius = 4 * devicePixelRatio;
-    cacheCtx.beginPath();
-    cacheCtx.moveTo(pageNumX + radius, pageNumY);
-    cacheCtx.lineTo(pageNumX + pageNumWidth - radius, pageNumY);
-    cacheCtx.quadraticCurveTo(pageNumX + pageNumWidth, pageNumY, pageNumX + pageNumWidth, pageNumY + radius);
-    cacheCtx.lineTo(pageNumX + pageNumWidth, pageNumY + pageNumHeight - radius);
-    cacheCtx.quadraticCurveTo(pageNumX + pageNumWidth, pageNumY + pageNumHeight, pageNumX + pageNumWidth - radius, pageNumY + pageNumHeight);
-    cacheCtx.lineTo(pageNumX + radius, pageNumY + pageNumHeight);
-    cacheCtx.quadraticCurveTo(pageNumX, pageNumY + pageNumHeight, pageNumX, pageNumY + pageNumHeight - radius);
-    cacheCtx.lineTo(pageNumX, pageNumY + radius);
-    cacheCtx.quadraticCurveTo(pageNumX, pageNumY, pageNumX + radius, pageNumY);
-    cacheCtx.closePath();
-    cacheCtx.fill();
-    
-    // 页码文字
-    cacheCtx.fillStyle = 'white';
-    cacheCtx.font = `${12 * devicePixelRatio}px Arial`;
-    cacheCtx.textAlign = 'center';
-    cacheCtx.textBaseline = 'middle';
-    cacheCtx.fillText(
-      `${pageIndex + 1}`,
-      pageNumX + pageNumWidth / 2,
-      pageNumY + pageNumHeight / 2
-    );
-    
-    cacheCtx.restore();
 
     // 将缓存内容复制到主canvas
     ctx.drawImage(cacheCanvas, 0, 0);
@@ -389,14 +453,16 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     pdfMetadata,
     viewState.scale,
     isScrolling,
-    imageCache,
-    getPagePosterState,
-    updatePagePosterState,
+    bitmapCacheRef,
     getTileState,
     updateTileState,
-    loadImage,
+    loadBitmap,
     getCacheCanvas,
-    needsFullRender
+    getStaticBackgroundCanvas,
+    needsFullRender,
+    rebuildStaticBackground,
+    computeTileGeometry,
+    paintTile
   ]);
 
   // 当需要重绘时执行
@@ -418,6 +484,9 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
         left: `${pageX - 2}px`,
         top: `${pageY - 2}px`,
         pointerEvents: 'none',
+        contentVisibility: 'auto',
+        contain: 'strict',
+        willChange: 'transform',
       }}
     />
   );
@@ -434,28 +503,112 @@ export const PdfContent: React.FC<PdfContentProps> = ({
   totalHeight,
   pdfState,
 }) => {
-  // 图像缓存
-  const [imageCache, setImageCache] = useState<ImageCache>({});
-  const [_, setNeedsRedraw] = useState(false);
+  // 使用 ref 缓存 ImageBitmap，避免触发 React 重渲染
+  const bitmapCacheRef = useRef<Map<string, ImageBitmap>>(new Map());
+  const inflightRef = useRef<Set<string>>(new Set());
   const [selectedText, setSelectedText] = useState<string>('');
   const lastScaleRef = useRef<number>(viewState.scale);
   
   const { crossPageSelection, setCrossPageSelection } = pdfState;
 
-  // 缩放变化时清理图像缓存和瓦片状态
+  // 缩放变化时清理缓存
   useEffect(() => {
     if (lastScaleRef.current !== viewState.scale) {
       console.log(`缩放变化: ${lastScaleRef.current} -> ${viewState.scale}, 清理缓存`);
       
-      // 清理图像缓存
-      setImageCache({});
-      
-      // 触发重绘
-      setNeedsRedraw(true);
+      // 清理 ImageBitmap 缓存
+      for (const bitmap of bitmapCacheRef.current.values()) {
+        bitmap.close(); // 释放 ImageBitmap 资源
+      }
+      bitmapCacheRef.current.clear();
+      inflightRef.current.clear();
       
       lastScaleRef.current = viewState.scale;
     }
   }, [viewState.scale]);
+
+  // 获取可见页面
+  const visiblePages = React.useMemo(() => {
+    if (!containerRef.current) return [];
+    
+    const containerHeight = containerRef.current.clientHeight;
+    return getVisiblePages(pageLayouts, containerHeight, viewState.scrollY);
+  }, [pageLayouts, viewState.scrollY, containerRef]);
+
+  // 获取扩展的可见页面（用于预加载）
+  const expandedVisiblePages = React.useMemo(() => {
+    if (!containerRef.current) return [];
+    
+    const containerHeight = containerRef.current.clientHeight;
+    return getExpandedVisiblePages(
+      pageLayouts, 
+      containerHeight, 
+      viewState.scrollY, 
+      lastScrollY, 
+      2 // PRELOAD_PAGES_AHEAD
+    );
+  }, [pageLayouts, viewState.scrollY, lastScrollY, containerRef]);
+
+  // 预加载扩展可见页面的瓦片
+  useEffect(() => {
+    if (isScrolling) return; // 滚动时不进行预加载
+
+    const preloadTiles = () => {
+      expandedVisiblePages.forEach(pageLayout => {
+        const { pageIndex } = pageLayout;
+        const [pageWidthPt, pageHeightPt] = pdfMetadata.page_dims[pageIndex];
+        const baseDpi = 150.0;
+        const scale = viewState.scale;
+        const effectiveDpi = baseDpi * scale;
+        
+        const wPx = Math.ceil((pageWidthPt / 72.0) * effectiveDpi);
+        const hPx = Math.ceil((pageHeightPt / 72.0) * effectiveDpi);
+        
+        const dpiScale = effectiveDpi / baseDpi;
+        const backendTileSize = Math.round(TILE_SIZE * dpiScale);
+        
+        const endTileX = Math.ceil(wPx / backendTileSize);
+        const endTileY = Math.ceil(hPx / backendTileSize);
+
+        for (let tx = 0; tx < endTileX; tx++) {
+          for (let ty = 0; ty < endTileY; ty++) {
+            // 低清瓦片预加载
+            const lowResTileInfo: TileInfo = {
+              id: pdfMetadata.id,
+              page: pageIndex,
+              scale: Math.round(viewState.scale * POSTER_SCALE_FACTOR * 100) / 100,
+              tx,
+              ty,
+            };
+
+            const lowResKey = `lowres_${generateTileKey(lowResTileInfo)}`;
+            const lowResTileState = pdfState.getTileState(lowResKey);
+            const lowResUrl = getTileUrl(lowResTileInfo, devicePixelRatio, false);
+
+            if (!lowResTileState.loading && !bitmapCacheRef.current.has(lowResKey)) {
+              pdfState.updateTileState(lowResKey, { loading: true });
+              scheduleLoad(async () => {
+                try {
+                  const response = await fetch(lowResUrl, { cache: 'force-cache' });
+                  const blob = await response.blob();
+                  const bitmap = await createImageBitmap(blob);
+                  bitmapCacheRef.current.set(lowResKey, bitmap);
+                  pdfState.updateTileState(lowResKey, { loaded: true, loading: false });
+                } catch (error) {
+                  console.warn('Failed to preload low-res tile:', lowResTileInfo);
+                  pdfState.updateTileState(lowResKey, { loading: false });
+                }
+              });
+            }
+          }
+        }
+      });
+    };
+
+    // 使用 setTimeout 进行预加载，避免阻塞主线程
+    const timeoutId = setTimeout(preloadTiles, 100);
+    return () => clearTimeout(timeoutId);
+  }, [expandedVisiblePages, viewState.scale, pdfMetadata, devicePixelRatio, isScrolling, bitmapCacheRef, pdfState]);
 
   // 跨页选区处理函数
   const handleGlobalMouseDown = useCallback(() => {
@@ -617,28 +770,6 @@ export const PdfContent: React.FC<PdfContentProps> = ({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [setCrossPageSelection]);
 
-  // 获取可见页面
-  const visiblePages = React.useMemo(() => {
-    if (!containerRef.current) return [];
-    
-    const containerHeight = containerRef.current.clientHeight;
-    return getVisiblePages(pageLayouts, containerHeight, viewState.scrollY);
-  }, [pageLayouts, viewState.scrollY, containerRef]);
-
-  // 获取扩展的可见页面（用于预加载）
-  const expandedVisiblePages = React.useMemo(() => {
-    if (!containerRef.current) return [];
-    
-    const containerHeight = containerRef.current.clientHeight;
-    return getExpandedVisiblePages(
-      pageLayouts, 
-      containerHeight, 
-      viewState.scrollY, 
-      lastScrollY, 
-      2 // PRELOAD_PAGES_AHEAD
-    );
-  }, [pageLayouts, viewState.scrollY, lastScrollY, containerRef]);
-
   // 计算最大页面宽度，用于确定内容容器宽度
   const maxPageWidth = React.useMemo(() => {
     if (pageLayouts.length === 0) return 0;
@@ -700,8 +831,8 @@ export const PdfContent: React.FC<PdfContentProps> = ({
         boxSizing: 'border-box',
       }}
     >
-      {/* Canvas 渲染层 */}
-      {expandedVisiblePages.map(pageLayout => (
+      {/* Canvas 渲染层 - 只渲染可见页面 */}
+      {visiblePages.map(pageLayout => (
         <PageCanvas
           key={pageLayout.pageIndex}
           pageLayout={pageLayout}
@@ -711,10 +842,9 @@ export const PdfContent: React.FC<PdfContentProps> = ({
           lastScrollY={lastScrollY}
           isScrolling={isScrolling}
           devicePixelRatio={devicePixelRatio}
-          imageCache={imageCache}
-          setImageCache={setImageCache}
+          bitmapCacheRef={bitmapCacheRef}
+          inflightRef={inflightRef}
           pdfState={pdfState}
-          setNeedsRedraw={setNeedsRedraw}
         />
       ))}
       
@@ -737,6 +867,8 @@ export const PdfContent: React.FC<PdfContentProps> = ({
               width: `${pageLayout.width}px`,
               height: `${pageLayout.height}px`,
               pointerEvents: 'none',
+              contentVisibility: 'auto',
+              contain: 'strict',
             }}
           >
             <PdfTextLayer
