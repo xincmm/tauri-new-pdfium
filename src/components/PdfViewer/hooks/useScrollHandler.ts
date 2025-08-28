@@ -10,7 +10,7 @@ import {
 
 interface UseScrollHandlerProps {
   containerRef: React.RefObject<HTMLDivElement | null>;
-  scrollTimeoutRef: React.RefObject<NodeJS.Timeout | null>;
+  scrollTimeoutRef: React.RefObject<ReturnType<typeof setTimeout> | null>;
   pdfMetadata: PdfMetadata | null;
   pageLayouts: PageLayout[];
   viewState: ViewState;

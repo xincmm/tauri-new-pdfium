@@ -13,7 +13,7 @@ import './PdfViewer.css';
 
 export const PdfViewer: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [devicePixelRatio] = React.useState(() => window.devicePixelRatio || 1);
 
   const pdfState = usePdfState();
