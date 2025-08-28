@@ -20,6 +20,7 @@ import {
 } from '../../utils/bucketUtils';
 import { PdfTextLayer } from './PdfTextLayer';
 import { PageCanvas } from './PageCanvas';
+import { ScrollMetrics } from './hooks/useScrollHandler';
 
 interface PdfContentProps {
   pdfMetadata: PdfMetadata;
@@ -31,6 +32,7 @@ interface PdfContentProps {
   devicePixelRatio: number;
   totalHeight: number;
   pdfState: ReturnType<typeof usePdfState>;
+  getScrollMetrics: () => ScrollMetrics;
 }
 
 // 瓦片加载并发控制（本地应用可以使用更高并发）
@@ -64,6 +66,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
   devicePixelRatio,
   totalHeight,
   pdfState,
+  getScrollMetrics,
 }) => {
   // 使用 ref 缓存 ImageBitmap，避免触发 React 重渲染
   const bitmapCacheRef = useRef<Map<string, ImageBitmap>>(new Map());
@@ -410,6 +413,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
           bitmapCacheRef={bitmapCacheRef}
           inflightRef={inflightRef}
           pdfState={pdfState}
+          getScrollMetrics={getScrollMetrics}
         />
       ))}
       

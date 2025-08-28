@@ -19,6 +19,11 @@ import {
   shouldSwitchToTargetBucket,
   generateBucketTileKey
 } from '../../utils/bucketUtils';
+import {
+  scrollBlit,
+  isTileInOverscanArea
+} from '../../utils/scrollOptimization';
+import { ScrollMetrics } from './hooks/useScrollHandler';
 
 // 瓦片几何信息缓存接口
 interface TileGeometry {
@@ -63,6 +68,7 @@ interface PageCanvasProps {
   bitmapCacheRef: React.MutableRefObject<Map<string, ImageBitmap>>;
   inflightRef: React.MutableRefObject<Set<string>>;
   pdfState: ReturnType<typeof usePdfState>;
+  getScrollMetrics?: () => ScrollMetrics;
 }
 
 export const PageCanvas: React.FC<PageCanvasProps> = ({
@@ -75,6 +81,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   bitmapCacheRef,
   inflightRef,
   pdfState,
+  getScrollMetrics,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cacheCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -390,6 +397,24 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
       canvas.style.height = `${pageHeight + 4}px`;
     }
 
+    // 第一道保险：画面复用（滚动时立刻有画面）
+    if (isScrolling && getScrollMetrics) {
+      const metrics = getScrollMetrics();
+      const deltaY = metrics.deltaY;
+      
+      // 只有在小范围滚动时才执行blit，大跳转时跳过
+      if (!metrics.isLargeJump && Math.abs(deltaY) > 0 && Math.abs(deltaY) < actualHeight * 0.8) {
+        const pixelDeltaY = deltaY * devicePixelRatio;
+        const blitResult = scrollBlit(ctx, 0, -pixelDeltaY);
+        
+        if (blitResult.blitPerformed) {
+          // 如果成功执行了blit，可以早退，只需要补充脏带
+          // 这里暂时继续完整渲染，后续可以优化为只渲染脏带
+          console.log(`Page ${pageIndex + 1} performed scroll blit, dirty rects:`, blitResult.dirtyRects.length);
+        }
+      }
+    }
+
     const cacheCanvas = getCacheCanvas();
     
     // 滚动中直接使用缓存，早退（特别是已有高清版本的页面）
@@ -506,7 +531,11 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
       }
     }
     
-    // 后台加载策略：为所有桶加载瓦片
+    // 第二道保险：基于overscan的优化加载策略
+    const scrollMetrics = getScrollMetrics?.();
+    const overscanConfig = scrollMetrics?.overscan || { extraCols: 1, extraRows: 1 };
+    
+    // 后台加载策略：为所有桶加载瓦片（带overscan优化）
     for (const bucket of allBuckets) {
       // 决定是否应该加载这个桶的瓦片
       const shouldLoadBucket = shouldLoadTargetBucket(activeBucket, bucket, currentScale) ||
@@ -514,8 +543,33 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
       
       if (!shouldLoadBucket) continue;
       
-      for (const tile of tileGeometry) {
-        const { tx, ty } = tile;
+      // 按优先级排序瓦片（近→远优先）
+      const sortedTiles = [...tileGeometry].sort((a, b) => {
+        const aCenter = a.tileY + (a.renderHeight / 2);
+        const bCenter = b.tileY + (b.renderHeight / 2);
+        const viewportCenter = pageHeight / 2; // 简化的视口中心
+        
+        const aDist = Math.abs(aCenter - viewportCenter);
+        const bDist = Math.abs(bCenter - viewportCenter);
+        
+        return aDist - bDist; // 距离近的优先
+      });
+      
+      for (const tile of sortedTiles) {
+        const { tx, ty, tileX, tileY, renderWidth, renderHeight } = tile;
+        
+        // 第二道保险：检查瓦片是否在overscan区域内
+        const isInOverscan = isTileInOverscanArea(
+          tileX, tileY, renderWidth, renderHeight,
+          0, 0, pageWidth, pageHeight, // 简化的视口区域
+          overscanConfig
+        );
+        
+        // 如果正在快速滚动且瓦片在overscan区域外，跳过加载
+        if (isScrolling && !isInOverscan && scrollMetrics && 
+            (Math.abs(scrollMetrics.velocity.vy) > 1)) { // 速度阈值 1px/ms
+          continue;
+        }
         
         const tileKey = generateBucketTileKey(bucket, {
           id: pdfMetadata.id,

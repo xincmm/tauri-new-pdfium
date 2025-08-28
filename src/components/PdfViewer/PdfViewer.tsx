@@ -6,6 +6,7 @@ import { calculatePageLayouts, getTotalDocumentHeight } from '../../utils/pdfLay
 import { PdfMetadata, DEFAULT_SCALE } from '../../types/pdf';
 import { PdfContent } from './PdfContent';
 import { PdfToolbar } from './PdfToolbar';
+import { ScrollPerformanceMonitor } from './ScrollPerformanceMonitor';
 import { useScrollHandler } from './hooks/useScrollHandler';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useTileLoader } from './hooks/useTileLoader';
@@ -40,7 +41,7 @@ export const PdfViewer: React.FC = () => {
   );
 
   // 使用自定义hooks
-  const { handleContainerScroll, handleWheel } = useScrollHandler({
+  const { handleContainerScroll, handleWheel, getScrollMetrics } = useScrollHandler({
     containerRef,
     scrollTimeoutRef,
     pdfMetadata,
@@ -144,9 +145,18 @@ export const PdfViewer: React.FC = () => {
             devicePixelRatio={devicePixelRatio}
             totalHeight={getTotalDocumentHeight(pageLayouts)}
             pdfState={pdfState}
+            getScrollMetrics={getScrollMetrics}
           />
         )}
       </div>
+      
+      {/* 滚动性能监控 */}
+      {pdfMetadata && (
+        <ScrollPerformanceMonitor
+          getScrollMetrics={getScrollMetrics}
+          isScrolling={isScrolling}
+        />
+      )}
     </div>
   );
 }; 
