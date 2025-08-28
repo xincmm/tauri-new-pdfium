@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { usePdfState } from '../../hooks/usePdfState';
 import { calculatePageLayouts, getTotalDocumentHeight } from '../../utils/pdfLayout';
-import { PdfMetadata } from '../../types/pdf';
+import { PdfMetadata, DEFAULT_SCALE } from '../../types/pdf';
 import { PdfContent } from './PdfContent';
 import { PdfToolbar } from './PdfToolbar';
 import { useScrollHandler } from './hooks/useScrollHandler';
@@ -122,7 +122,7 @@ export const PdfViewer: React.FC = () => {
           if (containerRef.current) {
             containerRef.current.scrollTop = 0;
           }
-          setViewState({ scale: 1.0, scrollY: 0 });
+          setViewState({ scale: DEFAULT_SCALE, scrollY: 0 });
           setCurrentVisiblePage(0);
         }}
       />

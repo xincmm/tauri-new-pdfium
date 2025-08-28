@@ -88,7 +88,7 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
     loadLayout();
   }, [loadLayout]);
 
-  // 设置画布尺寸
+  // 设置画布尺寸 - 添加 scale 依赖确保缩放变化时更新
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -97,7 +97,13 @@ export const PdfTextLayer: React.FC<PdfTextLayerProps> = ({
     canvas.height = pageHeight;
     canvas.style.width = `${pageWidth}px`;
     canvas.style.height = `${pageHeight}px`;
-  }, [pageWidth, pageHeight]);
+    
+    // 缩放变化时清除当前选区，避免坐标错位
+    setAnchor(null);
+    setFocus(null);
+    setIsSelecting(false);
+    setHasMouseMoved(false);
+  }, [pageWidth, pageHeight, scale]);
 
   // 字符命中测试
   const hitCharIndex = useCallback((x: number, y: number): number | null => {

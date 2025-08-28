@@ -3,7 +3,8 @@ import {
   PdfMetadata, 
   ViewState, 
   PagePosterState, 
-  TileState 
+  TileState,
+  DEFAULT_SCALE
 } from '../types/pdf';
 
 export interface CrossPageSelection {
@@ -17,7 +18,7 @@ export interface CrossPageSelection {
 export const usePdfState = () => {
   const [pdfMetadata, setPdfMetadata] = useState<PdfMetadata | null>(null);
   const [viewState, setViewState] = useState<ViewState>({
-    scale: 1.0,
+    scale: DEFAULT_SCALE,
     scrollY: 0,
   });
   const [loading, setLoading] = useState(false);
@@ -63,7 +64,7 @@ export const usePdfState = () => {
   const clearStates = useCallback(() => {
     setPagePosterStates(new Map());
     setTileStates(new Map());
-    setViewState({ scale: 1.0, scrollY: 0 });
+    setViewState({ scale: DEFAULT_SCALE, scrollY: 0 });
     setCurrentVisiblePage(0);
     setLastScrollY(0);
     setCrossPageSelection(null);

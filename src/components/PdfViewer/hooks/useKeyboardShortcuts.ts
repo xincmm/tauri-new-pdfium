@@ -5,7 +5,8 @@ import {
   PageLayout,
   MIN_SCALE,
   MAX_SCALE,
-  PAGE_MARGIN 
+  PAGE_MARGIN,
+  DEFAULT_SCALE
 } from '../../../types/pdf';
 
 interface UseKeyboardShortcutsProps {
@@ -47,7 +48,7 @@ export const useKeyboardShortcuts = ({
       containerRef.current.scrollTop = 0;
     }
     setViewState({
-      scale: 1.0,
+      scale: DEFAULT_SCALE,
       scrollY: 0,
     });
     setCurrentVisiblePage(0);

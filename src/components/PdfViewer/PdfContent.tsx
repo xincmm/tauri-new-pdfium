@@ -7,7 +7,8 @@ import {
   PageLayout, 
   TileInfo,
   TILE_SIZE,
-  PageTextLayout
+  PageTextLayout,
+  POSTER_SCALE_FACTOR
 } from '../../types/pdf';
 import { usePdfState } from '../../hooks/usePdfState';
 import { getVisiblePages, getExpandedVisiblePages } from '../../utils/pdfLayout';
@@ -69,6 +70,11 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     width: number;
     height: number;
   } | null>(null);
+
+  // 缩放变化时重置渲染状态
+  useEffect(() => {
+    lastRenderStateRef.current = null;
+  }, [viewState.scale]);
   
   const { 
     getPagePosterState, 
@@ -78,7 +84,11 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
   } = pdfState;
 
   const { pageIndex, y: pageY, width: pageWidth, height: pageHeight } = pageLayout;
-  const pageX = Math.max(0, (containerWidth - pageWidth) / 2);
+  // 如果内容宽度大于容器宽度，说明需要横向滚动，页面靠左对齐
+  // 否则页面居中
+  const pageX = containerWidth > pageWidth 
+    ? Math.max(20, (containerWidth - pageWidth) / 2)  // 居中
+    : 20;  // 靠左对齐，保持20px边距
 
   // 加载图像并缓存
   const loadImage = useCallback((url: string, key: string): Promise<HTMLImageElement> => {
@@ -217,19 +227,35 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     
     cacheCtx.restore();
 
-    // 2. 计算瓦片范围
+    // 2. 计算瓦片范围 - 基于页面的点坐标系统计算瓦片网格
+    // 将页面尺寸转换回点坐标，然后计算瓦片网格
+    const [pageWidthPt, pageHeightPt] = pdfMetadata.page_dims[pageIndex];
+    const baseDpi = 150.0;
+    const scale = viewState.scale;
+    const effectiveDpi = baseDpi * scale;
+    
+    // 页面在当前缩放下的像素尺寸（后端计算方式）
+    const wPx = Math.ceil((pageWidthPt / 72.0) * effectiveDpi);
+    const hPx = Math.ceil((pageHeightPt / 72.0) * effectiveDpi);
+    
+    // 后端的瓦片大小计算
+    const dpiScale = effectiveDpi / baseDpi;
+    const backendTileSize = Math.round(TILE_SIZE * dpiScale);
+    
+    // 计算瓦片网格
     const startTileX = 0;
-    const endTileX = Math.ceil(pageWidth / TILE_SIZE);
+    const endTileX = Math.ceil(wPx / backendTileSize);
     const startTileY = 0;
-    const endTileY = Math.ceil(pageHeight / TILE_SIZE);
+    const endTileY = Math.ceil(hPx / backendTileSize);
 
     // 3. 绘制瓦片（先低清，再高清）
     for (let tx = startTileX; tx < endTileX; tx++) {
       for (let ty = startTileY; ty < endTileY; ty++) {
-        const tileX = tx * TILE_SIZE;
-        const tileY = ty * TILE_SIZE;
-        const renderWidth = Math.min(TILE_SIZE, pageWidth - tx * TILE_SIZE);
-        const renderHeight = Math.min(TILE_SIZE, pageHeight - ty * TILE_SIZE);
+        // 前端渲染坐标（基于实际页面显示尺寸）
+        const tileX = (tx * backendTileSize) * (pageWidth / wPx);
+        const tileY = (ty * backendTileSize) * (pageHeight / hPx);
+        const renderWidth = Math.min(backendTileSize * (pageWidth / wPx), pageWidth - tileX);
+        const renderHeight = Math.min(backendTileSize * (pageHeight / hPx), pageHeight - tileY);
 
         // 高清瓦片信息
         const highResTileInfo: TileInfo = {
@@ -244,7 +270,7 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
         const lowResTileInfo: TileInfo = {
           id: pdfMetadata.id,
           page: pageIndex,
-          scale: Math.round(viewState.scale * 100) / 100,
+          scale: Math.round(viewState.scale * POSTER_SCALE_FACTOR * 100) / 100,
           tx,
           ty,
         };
@@ -412,8 +438,24 @@ export const PdfContent: React.FC<PdfContentProps> = ({
   const [imageCache, setImageCache] = useState<ImageCache>({});
   const [_, setNeedsRedraw] = useState(false);
   const [selectedText, setSelectedText] = useState<string>('');
+  const lastScaleRef = useRef<number>(viewState.scale);
   
   const { crossPageSelection, setCrossPageSelection } = pdfState;
+
+  // 缩放变化时清理图像缓存和瓦片状态
+  useEffect(() => {
+    if (lastScaleRef.current !== viewState.scale) {
+      console.log(`缩放变化: ${lastScaleRef.current} -> ${viewState.scale}, 清理缓存`);
+      
+      // 清理图像缓存
+      setImageCache({});
+      
+      // 触发重绘
+      setNeedsRedraw(true);
+      
+      lastScaleRef.current = viewState.scale;
+    }
+  }, [viewState.scale]);
 
   // 跨页选区处理函数
   const handleGlobalMouseDown = useCallback(() => {
@@ -597,13 +639,65 @@ export const PdfContent: React.FC<PdfContentProps> = ({
     );
   }, [pageLayouts, viewState.scrollY, lastScrollY, containerRef]);
 
+  // 计算最大页面宽度，用于确定内容容器宽度
+  const maxPageWidth = React.useMemo(() => {
+    if (pageLayouts.length === 0) return 0;
+    return Math.max(...pageLayouts.map(layout => layout.width));
+  }, [pageLayouts]);
+
+  // 监听容器大小变化
+  const [containerWidth, setContainerWidth] = React.useState(0);
+  
+  React.useEffect(() => {
+    const updateContainerWidth = () => {
+      if (containerRef.current) {
+        setContainerWidth(containerRef.current.clientWidth);
+      }
+    };
+    
+    updateContainerWidth();
+    
+    const resizeObserver = new ResizeObserver(updateContainerWidth);
+    if (containerRef.current) {
+      resizeObserver.observe(containerRef.current);
+    }
+    
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [containerRef]);
+
+  // 计算内容容器的实际宽度
+  const contentWidth = React.useMemo(() => {
+    const paddingHorizontal = 40; // 左右各20px的边距
+    // 如果页面宽度超出容器，则使用页面宽度+边距
+    // 否则使用容器宽度，让页面居中
+    const needsHorizontalScroll = maxPageWidth + paddingHorizontal > containerWidth;
+    const calculatedWidth = needsHorizontalScroll 
+      ? maxPageWidth + paddingHorizontal 
+      : containerWidth;
+    
+    // 横向滚动调试信息（可选择性保留）
+    // console.log('Content width calculation:', {
+    //   containerWidth,
+    //   maxPageWidth,
+    //   paddingHorizontal,
+    //   needsHorizontalScroll,
+    //   calculatedWidth
+    // });
+    
+    return calculatedWidth;
+  }, [maxPageWidth, containerWidth]);
+
   return (
     <div
       className="pdf-content"
       style={{
         position: 'relative',
         height: `${totalHeight}px`,
-        width: '100%',
+        width: `${contentWidth}px`,
+        minWidth: `${Math.max(containerWidth, contentWidth)}px`,
+        boxSizing: 'border-box',
       }}
     >
       {/* Canvas 渲染层 */}
@@ -612,7 +706,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
           key={pageLayout.pageIndex}
           pageLayout={pageLayout}
           pdfMetadata={pdfMetadata}
-          containerWidth={containerRef.current?.clientWidth || 0}
+          containerWidth={contentWidth}
           viewState={viewState}
           lastScrollY={lastScrollY}
           isScrolling={isScrolling}
@@ -626,7 +720,10 @@ export const PdfContent: React.FC<PdfContentProps> = ({
       
       {/* 文本选择层 */}
       {visiblePages.map(pageLayout => {
-        const pageX = Math.max(0, ((containerRef.current?.clientWidth || 0) - pageLayout.width) / 2);
+        // 如果内容宽度大于容器宽度，页面靠左对齐，否则居中
+        const pageX = containerWidth > pageLayout.width
+          ? Math.max(20, (containerWidth - pageLayout.width) / 2)  // 居中
+          : 20;  // 靠左对齐，保持20px边距
         const [pageWidthPt, pageHeightPt] = pdfMetadata.page_dims[pageLayout.pageIndex];
         
         return (
