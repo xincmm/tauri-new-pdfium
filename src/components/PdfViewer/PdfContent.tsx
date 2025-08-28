@@ -13,9 +13,7 @@ import { usePdfState } from '../../hooks/usePdfState';
 import { getVisiblePages, getExpandedVisiblePages } from '../../utils/pdfLayout';
 import { 
   getTileUrl, 
-  getPagePosterUrl, 
   generateTileKey, 
-  generatePosterKey 
 } from '../../utils/tileUtils';
 import { PdfTextLayer } from './PdfTextLayer';
 
