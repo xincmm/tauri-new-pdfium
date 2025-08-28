@@ -6,21 +6,20 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use pdfium_render::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::fs;
+
 use std::time::Instant;
 use std::{collections::HashMap, num::NonZeroUsize, sync::Arc};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
-const TILE_SIZE: u32 = 768;
-// 降低BASE_DPI以提升性能，144 DPI在大多数情况下已足够清晰
+// 优化瓦片尺寸和质量参数
+const TILE_SIZE: u32 = 512;
 const BASE_DPI: f32 = 150.0;
-const WEBP_QUALITY: u8 = 80;
-// 最大DPI限制，防止内存过度使用
+const WEBP_QUALITY: u8 = 70;
 const MAX_DPI: f32 = 600.0;
-// 最小DPI限制，确保低分辨率瓦片仍有合理质量
 const MIN_DPI: f32 = 36.0;
 
+// 持久化的文档数据结构，存储字节数据和页面信息
 struct PdfData {
     bytes: Vec<u8>,
     page_dims: Vec<(f32, f32)>,
@@ -35,7 +34,7 @@ struct TileKey {
     ty: u32,
 }
 
-// 页面图像缓存，存储整页渲染结果
+// 修复页面图像缓存键，使用真实文档ID和整数缩放
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PageKey {
     id: String,
@@ -43,12 +42,22 @@ struct PageKey {
     scale_x100: u32,
 }
 
+// 渲染请求跟踪，避免重复渲染
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RenderingKey {
+    id: String,
+    page: u32,
+    scale_x100: u32,
+}
+
 static DOCS: Lazy<Mutex<HashMap<String, Arc<PdfData>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static TILE_CACHE: Lazy<Mutex<LruCache<TileKey, Arc<Vec<u8>>>>> =
-    Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(200).unwrap())));
-// 页面图像缓存，减少重复渲染
+    Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(300).unwrap())));
 static PAGE_CACHE: Lazy<Mutex<LruCache<PageKey, Arc<image::DynamicImage>>>> =
-    Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(20).unwrap())));
+    Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(30).unwrap())));
+// 正在渲染的页面跟踪，避免重复渲染
+static RENDERING_PAGES: Lazy<Mutex<std::collections::HashSet<RenderingKey>>> =
+    Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PdfMetadata {
@@ -102,88 +111,60 @@ static PDFIUM_LIBRARY_PATH: once_cell::sync::OnceCell<String> = once_cell::sync:
 async fn open_pdf(
     path: String,
     state: tauri::State<'_, PdfiumLibraryPath>,
-) -> Result<PdfMetadata, String> {
-    println!("🔄 开始处理 PDF 文件: {}", path);
+) -> Result<crate::PdfMetadata, String> {
+    let start_time = Instant::now();
+    let library_path = state.0.clone();
 
-    println!("🔗 正在绑定 Pdfium 库，路径: {}", state.0);
-    let bindings = Pdfium::bind_to_library(&state.0)
-        .or_else(|e1| {
-            eprintln!("⚠️ 绑定到指定库失败: {}, 尝试系统库", e1);
-            Pdfium::bind_to_system_library().map_err(|e2| {
-                format!(
-                    "无法绑定到 Pdfium 库 - 指定库错误: {}, 系统库错误: {}",
-                    e1, e2
-                )
-            })
-        })
-        .map_err(|e| {
-            eprintln!("❌ Pdfium 库绑定完全失败: {}", e);
-            e
-        })?;
-    println!("✅ Pdfium 库绑定成功");
+    // 在 spawn_blocking 中执行文档加载和处理
+    let (id, total_pages, page_dims, bytes) = tauri::async_runtime::spawn_blocking(
+        move || -> Result<(String, u32, Vec<(f32, f32)>, Vec<u8>), String> {
+            let bindings = Pdfium::bind_to_library(&library_path)
+                .or_else(|_| Pdfium::bind_to_system_library())
+                .map_err(|e| format!("Failed to bind Pdfium library: {}", e))?;
+            let pdfium = Pdfium::new(bindings);
 
-    println!("🏗️ 正在创建 Pdfium 实例...");
-    let pdfium = Pdfium::new(bindings);
-    println!("✅ Pdfium 实例创建成功");
+            let doc = pdfium
+                .load_pdf_from_file(&path, None)
+                .map_err(|e| format!("PDF 文档加载失败: {}", e))?;
 
-    println!("📄 正在加载 PDF 文档...");
-    let doc = pdfium.load_pdf_from_file(&path, None).map_err(|e| {
-        let error = format!("PDF 文档加载失败: {}", e);
-        eprintln!("❌ {}", error);
-        error
-    })?;
-    println!("✅ PDF 文档加载成功");
+            let pages = doc.pages();
+            let total_pages = pages.len() as u32;
 
-    println!("📊 正在获取页面信息...");
-    let pages = doc.pages();
-    let total_pages = pages.len() as u32;
-    println!("📄 总页数: {}", total_pages);
+            let page_dims: Vec<(f32, f32)> = pages
+                .iter()
+                .map(|p| (p.width().value, p.height().value))
+                .collect();
 
-    println!("📏 正在获取页面尺寸...");
-    let page_dims: Vec<(f32, f32)> = pages
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let dims = (p.width().value, p.height().value);
-            println!("  页面 {}: {}x{}", i + 1, dims.0, dims.1);
-            dims
-        })
-        .collect();
-    println!("✅ 页面尺寸获取完成");
+            let id = Uuid::new_v4().to_string();
 
-    println!("🆔 正在生成文档 ID...");
-    let id = Uuid::new_v4().to_string();
-    println!("✅ 文档 ID: {}", id);
+            // 读取文件字节数据用于缓存
+            let bytes = std::fs::read(&path).map_err(|e| format!("文件读取失败: {}", e))?;
 
-    println!("💾 正在缓存文档数据...");
-    // 读取文件字节数据用于缓存
-    let bytes = fs::read(&path).map_err(|e| {
-        let error = format!("文件读取失败: {}", e);
-        eprintln!("❌ {}", error);
-        error
-    })?;
+            Ok((id, total_pages, page_dims, bytes))
+        },
+    )
+    .await
+    .map_err(|e| format!("Task join error: {}", e))??;
 
+    // 存储持久化的文档数据
     let data = Arc::new(PdfData {
         bytes,
         page_dims: page_dims.clone(),
     });
     DOCS.lock().insert(id.clone(), data);
-    println!("✅ 文档数据缓存完成");
 
-    let metadata = PdfMetadata {
+    let metadata = crate::PdfMetadata {
         id,
         total_pages,
         page_dims,
     };
 
-    println!("🎉 PDF 处理完成，返回元数据");
+    println!("✅ PDF 处理完成，耗时: {:?}", start_time.elapsed());
     Ok(metadata)
 }
 
 #[tauri::command]
 async fn get_page_text_layout(id: String, page: u32) -> Result<PageTextLayout, String> {
-    println!("📐 获取页面文本布局: id={}, page={}", id, page);
-
     // 获取文档数据
     let data_arc = DOCS
         .lock()
@@ -197,7 +178,8 @@ async fn get_page_text_layout(id: String, page: u32) -> Result<PageTextLayout, S
     // 在spawn_blocking中执行CPU密集型的Pdfium操作
     let layout = tauri::async_runtime::spawn_blocking(move || -> Result<PageTextLayout, String> {
         // 使用全局存储的 Pdfium 库路径
-        let library_path = PDFIUM_LIBRARY_PATH.get()
+        let library_path = PDFIUM_LIBRARY_PATH
+            .get()
             .ok_or_else(|| "Pdfium library path not initialized".to_string())?;
 
         let bindings = Pdfium::bind_to_library(library_path)
@@ -214,13 +196,12 @@ async fn get_page_text_layout(id: String, page: u32) -> Result<PageTextLayout, S
             .get(page as u16)
             .map_err(|e| format!("Page out of range: {}", e))?;
 
-        // 获取页面文本对象
         let mut chars = Vec::new();
 
         // 使用 Pdfium 的文本提取功能
         if let Ok(text_page) = pdf_page.text() {
             let char_count = text_page.chars().len();
-            println!("📝 页面 {} 包含 {} 个字符", page, char_count);
+            chars.reserve(char_count);
 
             // 遍历所有字符，提取位置信息
             for (i, char_obj) in text_page.chars().iter().enumerate() {
@@ -238,10 +219,6 @@ async fn get_page_text_layout(id: String, page: u32) -> Result<PageTextLayout, S
                     });
                 }
             }
-
-            println!("✅ 提取到 {} 个字符框", chars.len());
-        } else {
-            println!("⚠️ 无法获取页面文本对象");
         }
 
         Ok(PageTextLayout {
@@ -253,18 +230,12 @@ async fn get_page_text_layout(id: String, page: u32) -> Result<PageTextLayout, S
     .await
     .map_err(|e| format!("Task join error: {}", e))??;
 
-    println!("🎉 页面文本布局提取完成");
     Ok(layout)
 }
 
 /// （可选）按字符区间提词（若想后端做规范化则可用）
 #[tauri::command]
 async fn extract_text_range(id: String, page: u32, start: u32, end: u32) -> Result<String, String> {
-    println!(
-        "📝 提取文本范围: id={}, page={}, start={}, end={}",
-        id, page, start, end
-    );
-
     // 获取文档数据
     let data_arc = DOCS
         .lock()
@@ -277,7 +248,8 @@ async fn extract_text_range(id: String, page: u32, start: u32, end: u32) -> Resu
     // 在spawn_blocking中执行CPU密集型的Pdfium操作
     let text = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         // 使用全局存储的 Pdfium 库路径
-        let library_path = PDFIUM_LIBRARY_PATH.get()
+        let library_path = PDFIUM_LIBRARY_PATH
+            .get()
             .ok_or_else(|| "Pdfium library path not initialized".to_string())?;
 
         let bindings = Pdfium::bind_to_library(library_path)
@@ -294,7 +266,6 @@ async fn extract_text_range(id: String, page: u32, start: u32, end: u32) -> Resu
             .get(page as u16)
             .map_err(|e| format!("Page out of range: {}", e))?;
 
-        // 获取页面文本对象
         let mut result = String::new();
 
         // 使用 Pdfium 的文本提取功能
@@ -313,46 +284,118 @@ async fn extract_text_range(id: String, page: u32, start: u32, end: u32) -> Resu
     .await
     .map_err(|e| format!("Task join error: {}", e))??;
 
-    println!("🎉 文本范围提取完成，长度: {}", text.len());
     Ok(text)
 }
 
-// 获取或创建页面图像（异步版本，利用thread_safe特性）
+// 直接渲染瓦片区域，使用整页渲染后裁剪的策略
+async fn render_tile_direct(
+    data: &PdfData,
+    id: &str,
+    page: u32,
+    scale_x100: u32,
+    tx: u32,
+    ty: u32,
+) -> Result<Arc<Vec<u8>>> {
+    // 检查是否为整页请求
+    if tx == u32::MAX && ty == u32::MAX {
+        // 使用整页渲染
+        let page_img_arc = ensure_page_image(data, id, page, scale_x100).await?;
+
+        let result = tauri::async_runtime::spawn_blocking(move || -> Result<Arc<Vec<u8>>> {
+            // 编码整页图像为WebP
+            let rgba_img = page_img_arc.to_rgba8();
+            let raw = rgba_img.into_raw();
+            let webp = webp::Encoder::from_rgba(&raw, page_img_arc.width(), page_img_arc.height())
+                .encode(WEBP_QUALITY as f32);
+
+            Ok(Arc::new(webp.to_vec()))
+        })
+        .await??;
+
+        return Ok(result);
+    }
+
+    // 瓦片渲染 - 先获取整页图像，然后裁剪
+    let page_img_arc = ensure_page_image(data, id, page, scale_x100).await?;
+
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<Arc<Vec<u8>>> {
+        let (w, h) = page_img_arc.dimensions();
+        let scale = scale_x100 as f32 / 100.0;
+
+        // 计算实际的瓦片大小和位置，考虑DPI缩放
+        let effective_dpi = (BASE_DPI * scale).max(MIN_DPI).min(MAX_DPI);
+        let dpi_scale = effective_dpi / BASE_DPI;
+        let actual_tile_size = (TILE_SIZE as f32 * dpi_scale).round() as u32;
+        let x = tx * actual_tile_size;
+        let y = ty * actual_tile_size;
+
+        if x >= w || y >= h {
+            return Err(anyhow!("tile out of bounds"));
+        }
+
+        let tw = actual_tile_size.min(w - x);
+        let th = actual_tile_size.min(h - y);
+
+        let sub_rgba: image::RgbaImage = crop_imm(&*page_img_arc, x, y, tw, th).to_image();
+
+        // 编码为WebP
+        let raw = sub_rgba.into_raw();
+        let webp = webp::Encoder::from_rgba(&raw, tw, th).encode(WEBP_QUALITY as f32);
+
+        Ok(Arc::new(webp.to_vec()))
+    })
+    .await??;
+
+    Ok(result)
+}
+
+// 获取或创建页面图像（修复缓存键问题）
 async fn ensure_page_image(
     data: &PdfData,
+    id: &str,
     page: u32,
     scale_x100: u32,
 ) -> Result<Arc<image::DynamicImage>> {
     let page_key = PageKey {
-        id: "temp".to_string(), // 这里简化处理，实际应该用真实ID
+        id: id.to_string(),
+        page,
+        scale_x100,
+    };
+
+    let rendering_key = RenderingKey {
+        id: id.to_string(),
         page,
         scale_x100,
     };
 
     // 检查页面缓存
     if let Some(cached_img) = PAGE_CACHE.lock().get(&page_key) {
-        println!(
-            "✅ 页面图像缓存命中: page={}, scale={}",
-            page,
-            scale_x100 as f32 / 100.0
-        );
         return Ok(cached_img.clone());
     }
 
-    let t0 = Instant::now();
-    println!(
-        "🎨 开始渲染整页图像: page={}, scale={}",
-        page,
-        scale_x100 as f32 / 100.0
-    );
+    // 检查是否正在渲染，避免重复渲染
+    {
+        let mut rendering = RENDERING_PAGES.lock();
+        if rendering.contains(&rendering_key) {
+            // 等待一段时间后重试缓存
+            drop(rendering);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if let Some(cached_img) = PAGE_CACHE.lock().get(&page_key) {
+                return Ok(cached_img.clone());
+            }
+        } else {
+            rendering.insert(rendering_key.clone());
+        }
+    }
 
     let data_bytes = data.bytes.clone();
     let page_dims = data.page_dims[page as usize];
 
     // 在spawn_blocking中执行CPU密集型的Pdfium操作
-    let page_img = tauri::async_runtime::spawn_blocking(move || -> Result<image::DynamicImage> {
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<image::DynamicImage> {
         // 使用全局存储的 Pdfium 库路径
-        let library_path = PDFIUM_LIBRARY_PATH.get()
+        let library_path = PDFIUM_LIBRARY_PATH
+            .get()
             .ok_or_else(|| anyhow!("Pdfium library path not initialized"))?;
 
         let bindings =
@@ -368,12 +411,7 @@ async fn ensure_page_image(
         let w_px = ((w_pt / 72.0) * effective_dpi).ceil() as u32;
         let h_px = ((h_pt / 72.0) * effective_dpi).ceil() as u32;
 
-        println!(
-            "📏 页面尺寸 - 原始:{}x{} pt, 缩放:{}, 有效DPI:{}, 目标:{}x{} px",
-            w_pt, h_pt, scale, effective_dpi, w_px, h_px
-        );
-
-        let p = doc
+        let pdf_page = doc
             .pages()
             .get(page as u16)
             .map_err(|_| anyhow!("页面超出范围: {}", page))?;
@@ -382,32 +420,23 @@ async fn ensure_page_image(
             .set_target_width(w_px as i32)
             .set_maximum_height(h_px as i32);
 
-        let page_img = p.render_with_config(&cfg)?.as_image();
+        let page_img = pdf_page.render_with_config(&cfg)?.as_image();
         Ok(page_img)
     })
     .await??;
 
-    let t1 = Instant::now();
-    println!(
-        "✅ 整页渲染完成，耗时: {:?}, 尺寸: {}x{}",
-        t1 - t0,
-        page_img.width(),
-        page_img.height()
-    );
+    let result_arc = Arc::new(result);
+    PAGE_CACHE.lock().put(page_key, result_arc.clone());
 
-    let result = Arc::new(page_img);
-    PAGE_CACHE.lock().put(page_key, result.clone());
+    // 移除渲染标记
+    RENDERING_PAGES.lock().remove(&rendering_key);
 
-    Ok(result)
+    Ok(result_arc)
 }
 
 // 异步处理瓦片请求
 async fn handle_tile_request(uri: &str, _app: &AppHandle) -> Result<Vec<u8>> {
-    let request_start = Instant::now();
-    println!("🔗 收到瓦片请求: {}", uri);
-
     let parts: Vec<&str> = uri.trim_matches('/').split('/').collect();
-    println!("🔍 解析 URI 部分: {:?}", parts);
 
     let (id, page, scale, tx, ty) = match parts.as_slice() {
         [id, page_s, scale_s, tx_s, ty_s] => {
@@ -426,128 +455,37 @@ async fn handle_tile_request(uri: &str, _app: &AppHandle) -> Result<Vec<u8>> {
                 .ok_or_else(|| anyhow!("bad tile token"))?;
             (id.to_string(), page, scale, tx_s.parse()?, ty_s.parse()?)
         }
-        _ => {
-            eprintln!("❌ 无效的瓦片路径格式");
-            return Err(anyhow!("bad tile path"));
-        }
+        _ => return Err(anyhow!("bad tile path")),
     };
 
-    println!(
-        "📊 瓦片参数 - ID:{}, 页面:{}, 比例:{}, 瓦片:({},{})",
-        id, page, scale, tx, ty
-    );
-
+    let scale_x100 = (scale * 100.0).round() as u32;
     let key = TileKey {
         id: id.clone(),
         page,
-        scale_x100: (scale * 100.0).round() as u32,
+        scale_x100,
         tx,
         ty,
     };
 
-    // 1. 先检查瓦片缓存
+    // 检查瓦片缓存
     if let Some(buf) = TILE_CACHE.lock().get(&key) {
-        let total_time = request_start.elapsed();
-        println!("✅ 瓦片缓存命中，总耗时: {:?}", total_time);
         return Ok((**buf).clone());
     }
 
-    // 2. 获取文档数据
+    // 获取文档数据
     let data_arc = DOCS
         .lock()
         .get(&id)
         .ok_or_else(|| anyhow!("doc not found"))?
         .clone();
 
-    // 3. 渲染瓦片
-    let result = render_tile_directly(&data_arc, &key, request_start).await?;
+    // 使用直接瓦片渲染
+    let result = render_tile_direct(&data_arc, &id, page, scale_x100, tx, ty).await?;
 
-    // 4. 缓存结果
+    // 缓存结果
     TILE_CACHE.lock().put(key, result.clone());
 
-    let total_time = request_start.elapsed();
-    println!("✅ 瓦片请求处理完成，总耗时: {:?}", total_time);
-
     Ok((*result).clone())
-}
-
-async fn render_tile_directly(
-    data: &PdfData,
-    key: &TileKey,
-    request_start: Instant,
-) -> Result<Arc<Vec<u8>>> {
-    // 1. 获取整页图像（可能触发渲染或使用缓存）
-    let page_img_arc = ensure_page_image(data, key.page, key.scale_x100).await?;
-    let t1 = Instant::now();
-
-    // 2. 在spawn_blocking中执行CPU密集型的裁剪和编码操作
-    let key_clone = key.clone();
-    let request_start_clone = request_start;
-    let result = tauri::async_runtime::spawn_blocking(move || -> Result<Arc<Vec<u8>>> {
-        let t1_inner = t1;
-        
-        // 裁剪瓦片
-        let (w, h) = page_img_arc.dimensions();
-        let scale = key_clone.scale_x100 as f32 / 100.0;
-        
-        // 检查是否为整页请求（特殊标记：tx=-1, ty=-1）
-        if key_clone.tx == u32::MAX && key_clone.ty == u32::MAX {
-            // 返回整页图像，不进行裁剪
-            println!("📄 整页图像请求 - 页面:{}x{}, 缩放:{:.2}", w, h, scale);
-            
-            // 直接编码整页图像为WebP
-            let rgba_img = page_img_arc.to_rgba8();
-            let raw = rgba_img.into_raw();
-            let webp = webp::Encoder::from_rgba(&raw, w, h).encode(WEBP_QUALITY as f32);
-            let t3 = Instant::now();
-            
-            println!(
-                "⏱️  整页图像性能 - page={} scale={:.2}: 整页渲染={:?} 编码={:?} 总计={:?}",
-                key_clone.page, scale,
-                t1_inner - request_start_clone, t3 - t1_inner, t3 - request_start_clone
-            );
-            
-            return Ok(Arc::new(webp.to_vec()));
-        }
-        
-        // 计算实际的瓦片大小和位置，考虑DPI缩放
-        let effective_dpi = (BASE_DPI * scale).max(MIN_DPI).min(MAX_DPI);
-        let dpi_scale = effective_dpi / BASE_DPI;
-        let actual_tile_size = (TILE_SIZE as f32 * dpi_scale).round() as u32;
-        let x = key_clone.tx * actual_tile_size;
-        let y = key_clone.ty * actual_tile_size;
-
-        println!(
-            "📐 瓦片位置 - 页面:{}x{}, DPI缩放:{:.2}, 实际瓦片尺寸:{}, 瓦片起点:({},{})",
-            w, h, dpi_scale, actual_tile_size, x, y
-        );
-
-        if x >= w || y >= h {
-            return Err(anyhow!("tile out of bounds"));
-        }
-
-        let tw = actual_tile_size.min(w - x);
-        let th = actual_tile_size.min(h - y);
-
-        let sub_rgba: image::RgbaImage = crop_imm(&*page_img_arc, x, y, tw, th).to_image();
-        let t2 = Instant::now();
-
-        // 3. 编码为WebP
-        let raw = sub_rgba.into_raw();
-        let webp = webp::Encoder::from_rgba(&raw, tw, th).encode(WEBP_QUALITY as f32);
-        let t3 = Instant::now();
-
-        // 性能监控日志
-        println!(
-            "⏱️  性能统计 - page={} scale={:.2} tile=({},{}): 整页渲染={:?} 裁剪={:?} 编码={:?} 总计={:?}",
-            key_clone.page, scale, key_clone.tx, key_clone.ty,
-            t1_inner - request_start_clone, t2 - t1_inner, t3 - t2, t3 - request_start_clone
-        );
-
-        Ok(Arc::new(webp.to_vec()))
-    }).await??;
-
-    Ok(result)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -564,8 +502,6 @@ pub fn run() {
         .setup(|app| {
             use tauri::path::BaseDirectory;
 
-            println!("🚀 开始初始化 Tauri 应用...");
-
             let rel_path = if cfg!(target_os = "macos") {
                 "sidecars/libpdfium.dylib-aarch64-apple-darwin"
             } else if cfg!(target_os = "windows") {
@@ -574,32 +510,17 @@ pub fn run() {
                 "sidecars/libpdfium.so"
             };
 
-            println!("🔍 解析 Pdfium 库路径，相对路径: {}", rel_path);
             let lib_path = app
                 .path()
                 .resolve(rel_path, BaseDirectory::Resource)
-                .unwrap_or_else(|e| {
-                    eprintln!("⚠️ 无法解析资源路径: {}, 使用相对路径", e);
-                    std::path::PathBuf::from(rel_path)
-                });
+                .unwrap_or_else(|_| std::path::PathBuf::from(rel_path));
 
             let library_path = lib_path.to_string_lossy().to_string();
-            println!("📚 使用 Pdfium 库路径: {}", library_path);
-
-            // 检查文件是否存在
-            if std::path::Path::new(&library_path).exists() {
-                println!("✅ Pdfium 库文件存在");
-            } else {
-                eprintln!("❌ Pdfium 库文件不存在: {}", library_path);
-            }
 
             // 设置全局 Pdfium 库路径
             PDFIUM_LIBRARY_PATH.set(library_path.clone()).unwrap();
-            
-            app.manage(PdfiumLibraryPath(library_path));
-            println!("💾 PdfiumLibraryPath 状态已管理");
 
-            println!("🎉 Tauri 应用初始化完成");
+            app.manage(PdfiumLibraryPath(library_path));
             Ok(())
         })
         .register_asynchronous_uri_scheme_protocol("tiles", |ctx, request, responder| {
@@ -627,7 +548,7 @@ pub fn run() {
                 );
             }
 
-            // 异步处理瓦片请求，利用thread_safe特性实现真正的并行处理
+            // 异步处理瓦片请求
             tauri::async_runtime::spawn(async move {
                 let response = match handle_tile_request(&path, &app).await {
                     Ok(bytes) => Response::builder()
@@ -639,15 +560,12 @@ pub fn run() {
                         .header(header::CACHE_CONTROL, "public, max-age=31536000")
                         .body(bytes)
                         .unwrap(),
-                    Err(e) => {
-                        eprintln!("❌ 瓦片处理错误: {}", e);
-                        Response::builder()
-                            .status(StatusCode::NOT_FOUND)
-                            .header(header::CONTENT_TYPE, "text/plain")
-                            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, &origin)
-                            .body(format!("tile error: {}", e).into_bytes())
-                            .unwrap()
-                    }
+                    Err(e) => Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .header(header::CONTENT_TYPE, "text/plain")
+                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, &origin)
+                        .body(format!("tile error: {}", e).into_bytes())
+                        .unwrap(),
                 };
 
                 responder.respond(response);
