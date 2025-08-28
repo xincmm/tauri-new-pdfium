@@ -219,45 +219,31 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
     
     cacheCtx.restore();
 
-    // 2. 绘制海报图
-    const posterKey = generatePosterKey(pdfMetadata.id, pageIndex);
-    const posterState = getPagePosterState(posterKey);
-    const posterUrl = getPagePosterUrl(pdfMetadata.id, pageIndex, devicePixelRatio);
-
-    if (imageCache[posterKey]) {
-      cacheCtx.save();
-      cacheCtx.globalAlpha = posterState.loaded ? 1 : 0.3;
-      
-      cacheCtx.drawImage(
-        imageCache[posterKey],
-        2 * devicePixelRatio,
-        2 * devicePixelRatio,
-        pageWidth * devicePixelRatio,
-        pageHeight * devicePixelRatio
-      );
-      cacheCtx.restore();
-    } else if (!posterState.loading) {
-      updatePagePosterState(posterKey, { loading: true });
-      loadImage(posterUrl, posterKey)
-        .then(() => {
-          updatePagePosterState(posterKey, { loaded: true, loading: false });
-          setNeedsRedraw(true);
-        })
-        .catch(() => {
-          console.warn('Failed to load page poster:', pageIndex);
-          updatePagePosterState(posterKey, { loading: false });
-        });
-    }
-
-    // 3. 绘制高分辨率瓦片
+    // 2. 计算瓦片范围
     const startTileX = 0;
     const endTileX = Math.ceil(pageWidth / TILE_SIZE);
     const startTileY = 0;
     const endTileY = Math.ceil(pageHeight / TILE_SIZE);
 
+    // 3. 绘制瓦片（先低清，再高清）
     for (let tx = startTileX; tx < endTileX; tx++) {
       for (let ty = startTileY; ty < endTileY; ty++) {
-        const tileInfo: TileInfo = {
+        const tileX = tx * TILE_SIZE;
+        const tileY = ty * TILE_SIZE;
+        const renderWidth = Math.min(TILE_SIZE, pageWidth - tx * TILE_SIZE);
+        const renderHeight = Math.min(TILE_SIZE, pageHeight - ty * TILE_SIZE);
+
+        // 高清瓦片信息
+        const highResTileInfo: TileInfo = {
+          id: pdfMetadata.id,
+          page: pageIndex,
+          scale: Math.round(viewState.scale * 100) / 100,
+          tx,
+          ty,
+        };
+        
+        // 低清瓦片信息（使用更低的缩放比例）
+        const lowResTileInfo: TileInfo = {
           id: pdfMetadata.id,
           page: pageIndex,
           scale: Math.round(viewState.scale * 100) / 100,
@@ -265,37 +251,69 @@ const PageCanvas: React.FC<PageCanvasProps> = ({
           ty,
         };
 
-        const tileX = tx * TILE_SIZE;
-        const tileY = ty * TILE_SIZE;
-        const renderWidth = Math.min(TILE_SIZE, pageWidth - tx * TILE_SIZE);
-        const renderHeight = Math.min(TILE_SIZE, pageHeight - ty * TILE_SIZE);
+        // 为低清和高清瓦片生成不同的缓存key
+        const highResKey = `highres_${generateTileKey(highResTileInfo)}`;
+        const lowResKey = `lowres_${generateTileKey(lowResTileInfo)}`;
+        const highResTileState = getTileState(highResKey);
+        const lowResTileState = getTileState(lowResKey);
+        
+        const highResUrl = getTileUrl(highResTileInfo, devicePixelRatio, true);  // 高清
+        const lowResUrl = getTileUrl(lowResTileInfo, devicePixelRatio, false);   // 低清
 
-        const key = generateTileKey(tileInfo);
-        const tileState = getTileState(key);
-        const tileUrl = getTileUrl(tileInfo, devicePixelRatio, true);
-
-        if (imageCache[key] && tileState.loaded) {
+        // 优先绘制高清瓦片，如果没有则绘制低清瓦片
+        if (imageCache[highResKey] && highResTileState.loaded) {
+          // 绘制高清瓦片
           cacheCtx.save();
           cacheCtx.imageSmoothingEnabled = false;
           
           cacheCtx.drawImage(
-            imageCache[key],
+            imageCache[highResKey],
             (tileX + 2) * devicePixelRatio,
             (tileY + 2) * devicePixelRatio,
             renderWidth * devicePixelRatio,
             renderHeight * devicePixelRatio
           );
           cacheCtx.restore();
-        } else if (!tileState.loading && !imageCache[key] && !isScrolling) {
-          updateTileState(key, { loading: true });
-          loadImage(tileUrl, key)
+        } else if (imageCache[lowResKey] && lowResTileState.loaded) {
+          // 绘制低清瓦片作为占位
+          cacheCtx.save();
+          cacheCtx.imageSmoothingEnabled = true; // 低清瓦片使用平滑缩放
+          
+          cacheCtx.drawImage(
+            imageCache[lowResKey],
+            (tileX + 2) * devicePixelRatio,
+            (tileY + 2) * devicePixelRatio,
+            renderWidth * devicePixelRatio,
+            renderHeight * devicePixelRatio
+          );
+          cacheCtx.restore();
+        }
+
+        // 加载高清瓦片
+        if (!highResTileState.loading && !imageCache[highResKey] && !isScrolling) {
+          updateTileState(highResKey, { loading: true });
+          loadImage(highResUrl, highResKey)
             .then(() => {
-              updateTileState(key, { loaded: true, loading: false });
+              updateTileState(highResKey, { loaded: true, loading: false });
               setNeedsRedraw(true);
             })
             .catch(() => {
-              console.warn('Failed to load high-res tile:', tileInfo);
-              updateTileState(key, { loading: false });
+              console.warn('Failed to load high-res tile:', highResTileInfo);
+              updateTileState(highResKey, { loading: false });
+            });
+        }
+
+        // 加载低清瓦片（如果高清瓦片还没有的话）
+        if (!imageCache[highResKey] && !lowResTileState.loading && !imageCache[lowResKey]) {
+          updateTileState(lowResKey, { loading: true });
+          loadImage(lowResUrl, lowResKey)
+            .then(() => {
+              updateTileState(lowResKey, { loaded: true, loading: false });
+              setNeedsRedraw(true);
+            })
+            .catch(() => {
+              console.warn('Failed to load low-res tile:', lowResTileInfo);
+              updateTileState(lowResKey, { loading: false });
             });
         }
       }

@@ -296,6 +296,7 @@ async fn render_tile_direct(
     tx: u32,
     ty: u32,
 ) -> Result<Arc<Vec<u8>>> {
+    let start_time = std::time::Instant::now();
     // 检查是否为整页请求
     if tx == u32::MAX && ty == u32::MAX {
         // 使用整页渲染
@@ -346,7 +347,331 @@ async fn render_tile_direct(
     })
     .await??;
 
+    let elapsed = start_time.elapsed();
+    println!(
+        "📊 传统瓦片渲染 - 页面:{} 瓦片:{}x{} 缩放:{} 耗时:{:?}",
+        page, tx, ty, scale_x100, elapsed
+    );
+
     Ok(result)
+}
+
+// 新的原生瓦片直渲染函数：使用 FPDF_RenderPageBitmapWithMatrix 矩阵 + 裁剪
+async fn render_tile_direct_native(
+    data: &PdfData,
+    _id: &str,
+    page_index: u32,
+    scale_x100: u32,
+    tx: u32,
+    ty: u32,
+) -> Result<Arc<Vec<u8>>> {
+    use std::cmp::min;
+
+    // 整页请求：仍可走整页直出（很少用，保留分支）
+    if tx == u32::MAX && ty == u32::MAX {
+        return render_fullpage_direct_native(data, page_index, scale_x100).await;
+    }
+
+    let data_bytes = data.bytes.clone();
+    let (w_pt, h_pt) = data.page_dims[page_index as usize];
+
+    // 在阻塞线程里做 Pdfium 调用
+    let start_time = std::time::Instant::now();
+    let webp = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<u8>, u32, u32)> {
+        let step1_start = std::time::Instant::now();
+
+        // 1) 绑定 & 打开文档 & 取页
+        let lib_path = PDFIUM_LIBRARY_PATH
+            .get()
+            .ok_or_else(|| anyhow!("Pdfium path not set"))?;
+        let bindings =
+            Pdfium::bind_to_library(lib_path).or_else(|_| Pdfium::bind_to_system_library())?;
+        let pdfium = Pdfium::new(bindings);
+
+        let doc = pdfium.load_pdf_from_byte_slice(&data_bytes, None)?;
+        let page = doc
+            .pages()
+            .get(page_index as u16)
+            .map_err(|_| anyhow!("page out of range"))?;
+
+        let step1_elapsed = step1_start.elapsed();
+        println!("  📊 步骤1 - PDF加载: {:?}", step1_elapsed);
+
+        let step2_start = std::time::Instant::now();
+
+        // 2) 计算 DPI / 像素尺寸 / 瓦片在整页位图中的像素矩形
+        let zoom = scale_x100 as f32 / 100.0;
+        let effective_dpi = (BASE_DPI * zoom).clamp(MIN_DPI, MAX_DPI);
+        let s = effective_dpi / 72.0; // pt->px
+
+        let w_px = ((w_pt / 72.0) * effective_dpi).ceil() as u32;
+        let h_px = ((h_pt / 72.0) * effective_dpi).ceil() as u32;
+
+        let dpi_scale = effective_dpi / BASE_DPI;
+        let actual_tile = (TILE_SIZE as f32 * dpi_scale).round() as u32;
+
+        let x_px = tx.saturating_mul(actual_tile);
+        let y_px = ty.saturating_mul(actual_tile);
+
+        if x_px >= w_px || y_px >= h_px {
+            return Err(anyhow!("tile out of bounds"));
+        }
+
+        let tw = min(actual_tile, w_px - x_px);
+        let th = min(actual_tile, h_px - y_px);
+
+        // 3) 计算 page-space 的瓦片矩形（单位 pt）
+        // 1px 出血，避免瓦片缝
+        let bleed_pt = 1.0 / s;
+
+        // 瓦片的 page-space 边界（单位 pt）
+        // 简化：直接模拟高级API的行为，不进行复杂的坐标转换
+        let left_pt = (x_px as f32) / s - bleed_pt;
+        let top_pt = (y_px as f32) / s - bleed_pt;
+        let right_pt = ((x_px + tw) as f32) / s + bleed_pt;
+        let bottom_pt = ((y_px + th) as f32) / s + bleed_pt;
+
+        let step2_elapsed = step2_start.elapsed();
+        println!("  📊 步骤2 - 坐标计算: {:?}", step2_elapsed);
+
+        let step3_start = std::time::Instant::now();
+
+        // 4) 创建 tw×th 目标位图（BGRA），并调用 FPDF_RenderPageBitmapWithMatrix
+        let b = pdfium.bindings(); // 访问底层 FPDF_* 绑定
+        unsafe {
+            // 创建位图（带 Alpha）
+            let bmp = b.FPDFBitmap_CreateEx(
+                tw as i32,
+                th as i32,
+                4, // FPDFBitmap_BGRx/BGRA format
+                std::ptr::null_mut(),
+                0,
+            );
+            if bmp.is_null() {
+                return Err(anyhow!("FPDFBitmap_CreateEx failed"));
+            }
+
+            // 取得底层页句柄
+            let raw_page = b.get_handle_from_page(&page);
+
+            // 获取页面旋转（0..3；分别表示 0/90/180/270 度）
+            let rot: i32 = b.FPDFPage_GetRotation(raw_page) as i32;
+
+            let step3_elapsed = step3_start.elapsed();
+            println!("  📊 步骤3 - 位图创建: {:?}", step3_elapsed);
+
+            println!(
+                "🔍 调试信息 - 页面:{}x{} 像素:{}x{} 瓦片位置:({},{}) 瓦片尺寸:{}x{} 旋转:{}({}°)",
+                w_pt,
+                h_pt,
+                w_px,
+                h_px,
+                x_px,
+                y_px,
+                tw,
+                th,
+                rot,
+                rot * 90
+            );
+            println!(
+                "🔍 PDF坐标 - left:{:.2} bottom:{:.2} top:{:.2}",
+                left_pt, bottom_pt, top_pt
+            );
+
+            // —— 核心：针对 0/90/180/270 四种旋转给出"不会镜像"的矩阵 ——
+            let s_f = s as f32;
+            let tw_f = tw as f32;
+            let th_f = th as f32;
+
+            let mut m = match rot {
+                // 旋转 0°：简化版本，模拟高级API的行为
+                0 => pdfium_render::prelude::FS_MATRIX {
+                    a: s_f,
+                    b: 0.0,
+                    c: 0.0,
+                    d: s_f, // 不翻转Y轴
+                    e: -s_f * left_pt,
+                    f: -s_f * top_pt, // 简单的负值
+                },
+                // 旋转 90°（顺时针）：x' = s*(y - top) + tw,  y' = s*(x - left)
+                1 => pdfium_render::prelude::FS_MATRIX {
+                    a: 0.0,
+                    b: s_f,
+                    c: s_f,
+                    d: 0.0,
+                    e: -s_f * top_pt + tw_f,
+                    f: -s_f * left_pt,
+                },
+                // 旋转 180°：x' = -s*(x - left) + tw,  y' =  s*(y - top) + th
+                2 => pdfium_render::prelude::FS_MATRIX {
+                    a: -s_f,
+                    b: 0.0,
+                    c: 0.0,
+                    d: s_f,
+                    e: s_f * left_pt + tw_f,
+                    f: -s_f * top_pt + th_f,
+                },
+                // 旋转 270°：x' = -s*(y - top),  y' = -s*(x - left) + th
+                3 => pdfium_render::prelude::FS_MATRIX {
+                    a: 0.0,
+                    b: -s_f,
+                    c: -s_f,
+                    d: 0.0,
+                    e: s_f * top_pt,
+                    f: s_f * left_pt + th_f,
+                },
+                _ => pdfium_render::prelude::FS_MATRIX {
+                    // 兜底，当成 0°
+                    a: s_f,
+                    b: 0.0,
+                    c: 0.0,
+                    d: -s_f,
+                    e: -s_f * left_pt,
+                    f: s_f * top_pt,
+                },
+            };
+
+            // 设备裁剪矩形就是瓦片位图范围
+            let clip = pdfium_render::prelude::FS_RECTF {
+                left: 0.0,
+                top: 0.0,
+                right: tw as f32,
+                bottom: th as f32,
+            };
+
+            // 屏显建议：锐文本 + 批注
+            let flags: i32 = 0x01 /*FPDF_LCD_TEXT*/ | 0x02 /*FPDF_ANNOT*/;
+
+            let step4_start = std::time::Instant::now();
+            b.FPDFBitmap_FillRect(bmp, 0, 0, tw as i32, th as i32, 0x00000000);
+            b.FPDF_RenderPageBitmapWithMatrix(bmp, raw_page, &mut m, &clip, flags);
+            let step4_elapsed = step4_start.elapsed();
+            println!("  📊 步骤4 - PDF渲染: {:?}", step4_elapsed);
+
+            let step5_start = std::time::Instant::now();
+
+            // 取像素缓冲 & stride，转成 RGBA（从 BGRA 到 RGBA）
+            let buf = b.FPDFBitmap_GetBuffer(bmp) as *const u8;
+            let stride = b.FPDFBitmap_GetStride(bmp) as usize;
+            let src = std::slice::from_raw_parts(buf, stride * (th as usize));
+
+            // 将可能带对齐的行，拷成紧凑 RGBA
+            let mut rgba = Vec::with_capacity((tw * th * 4) as usize);
+            for row in 0..(th as usize) {
+                let start = row * stride;
+                let row_bytes = &src[start..start + (tw as usize) * 4];
+                // BGRA -> RGBA
+                for px in row_bytes.chunks_exact(4) {
+                    rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+                }
+            }
+
+            // 销毁位图
+            b.FPDFBitmap_Destroy(bmp);
+
+            let step5_elapsed = step5_start.elapsed();
+            println!("  📊 步骤5 - 像素转换: {:?}", step5_elapsed);
+
+            let step6_start = std::time::Instant::now();
+            // 5) WebP 编码（与现有一致）
+            let webp = webp::Encoder::from_rgba(&rgba, tw, th).encode(WEBP_QUALITY as f32);
+            let step6_elapsed = step6_start.elapsed();
+            println!("  📊 步骤6 - WebP编码: {:?}", step6_elapsed);
+
+            Ok((webp.to_vec(), tw, th))
+        }
+    })
+    .await??;
+
+    let elapsed = start_time.elapsed();
+    println!(
+        "🚀 原生瓦片渲染 - 页面:{} 瓦片:{}x{} 缩放:{} 尺寸:{}x{} 耗时:{:?}",
+        page_index, tx, ty, scale_x100, webp.1, webp.2, elapsed
+    );
+
+    Ok(Arc::new(webp.0))
+}
+
+// 整页直出（若需要 tiles/-1_-1 的整页下载）
+async fn render_fullpage_direct_native(
+    data: &PdfData,
+    page_index: u32,
+    scale_x100: u32,
+) -> Result<Arc<Vec<u8>>> {
+    let data_bytes = data.bytes.clone();
+    let (w_pt, h_pt) = data.page_dims[page_index as usize];
+
+    let webp = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>> {
+        let lib_path = PDFIUM_LIBRARY_PATH
+            .get()
+            .ok_or_else(|| anyhow!("Pdfium path not set"))?;
+        let bindings =
+            Pdfium::bind_to_library(lib_path).or_else(|_| Pdfium::bind_to_system_library())?;
+        let pdfium = Pdfium::new(bindings);
+
+        let doc = pdfium.load_pdf_from_byte_slice(&data_bytes, None)?;
+        let page = doc
+            .pages()
+            .get(page_index as u16)
+            .map_err(|_| anyhow!("page out of range"))?;
+
+        let scale = scale_x100 as f32 / 100.0;
+        let effective_dpi = (BASE_DPI * scale).clamp(MIN_DPI, MAX_DPI);
+        let s = effective_dpi / 72.0;
+
+        let w_px = ((w_pt / 72.0) * effective_dpi).ceil() as u32;
+        let h_px = ((h_pt / 72.0) * effective_dpi).ceil() as u32;
+
+        let b = pdfium.bindings();
+        unsafe {
+            let bmp = b.FPDFBitmap_CreateEx(w_px as i32, h_px as i32, 4, std::ptr::null_mut(), 0);
+            if bmp.is_null() {
+                return Err(anyhow!("FPDFBitmap_CreateEx failed"));
+            }
+
+            b.FPDFBitmap_FillRect(bmp, 0, 0, w_px as i32, h_px as i32, 0x00FFFFFF);
+
+            // 整页矩阵：简化版本，与瓦片渲染保持一致
+            let mut m = pdfium_render::prelude::FS_MATRIX {
+                a: s,
+                b: 0.0,
+                c: 0.0,
+                d: s, // 不翻转Y轴，与瓦片渲染保持一致
+                e: 0.0,
+                f: 0.0, // 简化偏移
+            };
+            let clip = pdfium_render::prelude::FS_RECTF {
+                left: 0.0,
+                top: 0.0,
+                right: w_px as f32,
+                bottom: h_px as f32,
+            };
+
+            let raw_page = b.get_handle_from_page(&page);
+            b.FPDF_RenderPageBitmapWithMatrix(bmp, raw_page, &mut m, &clip, 0);
+
+            let buf = b.FPDFBitmap_GetBuffer(bmp) as *const u8;
+            let stride = b.FPDFBitmap_GetStride(bmp) as usize;
+            let src = std::slice::from_raw_parts(buf, stride * (h_px as usize));
+
+            let mut rgba = Vec::with_capacity((w_px * h_px * 4) as usize);
+            for row in 0..(h_px as usize) {
+                let start = row * stride;
+                let row_bytes = &src[start..start + (w_px as usize) * 4];
+                for px in row_bytes.chunks_exact(4) {
+                    rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+                }
+            }
+
+            b.FPDFBitmap_Destroy(bmp);
+
+            let webp = webp::Encoder::from_rgba(&rgba, w_px, h_px).encode(WEBP_QUALITY as f32);
+            Ok(webp.to_vec())
+        }
+    })
+    .await??;
+
+    Ok(Arc::new(webp))
 }
 
 // 获取或创建页面图像（修复缓存键问题）
@@ -479,8 +804,9 @@ async fn handle_tile_request(uri: &str, _app: &AppHandle) -> Result<Vec<u8>> {
         .ok_or_else(|| anyhow!("doc not found"))?
         .clone();
 
-    // 使用直接瓦片渲染
-    let result = render_tile_direct(&data_arc, &id, page, scale_x100, tx, ty).await?;
+    // 测试简化版本的新方法
+    // let result = render_tile_direct(&data_arc, &id, page, scale_x100, tx, ty).await?; // 旧方法：整页渲染后裁剪
+    let result = render_tile_direct_native(&data_arc, &id, page, scale_x100, tx, ty).await?; // 新方法：简化版本
 
     // 缓存结果
     TILE_CACHE.lock().put(key, result.clone());
