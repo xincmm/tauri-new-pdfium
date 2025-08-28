@@ -59,6 +59,6 @@ export const MIN_SCALE = 0.1;
 export const MAX_SCALE = 5.0;
 export const PAGE_MARGIN = 20; // 页面间距
 export const SCROLL_DEBOUNCE_MS = 150; // 滚动停止后的延迟时间
-export const POSTER_SCALE_FACTOR = 0.4; // 海报图的缩放因子（提升分辨率以改善视觉效果）
+export const POSTER_SCALE_FACTOR = 0.6; // 海报图的缩放因子（提升分辨率以改善视觉效果）
 export const HIGH_RES_LOAD_DELAY = 300; // 高分辨率瓦片加载延迟
 export const PRELOAD_PAGES_AHEAD = 2; // 预加载下面几页 
