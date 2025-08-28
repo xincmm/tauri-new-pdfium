@@ -4,7 +4,7 @@ use std::collections::HashMap;
 // 优化瓦片尺寸和质量参数
 pub const TILE_SIZE: u32 = 512;
 pub const BASE_DPI: f32 = 150.0;
-pub const WEBP_QUALITY: u8 = 70;
+pub const WEBP_QUALITY: u8 = 75;
 pub const MAX_DPI: f32 = 1000.0;
 pub const MIN_DPI: f32 = 36.0;
 

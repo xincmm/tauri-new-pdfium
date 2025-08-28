@@ -5,13 +5,20 @@ import {
   PageLayout, 
   TileInfo,
   TILE_SIZE,
-  POSTER_SCALE_FACTOR
+  RenderBucket,
+  PageRenderState
 } from '../../types/pdf';
 import { usePdfState } from '../../hooks/usePdfState';
 import { 
-  getTileUrl, 
-  generateTileKey, 
+  getTileUrl 
 } from '../../utils/tileUtils';
+import {
+  generateRenderBuckets,
+  selectBestAvailableBucket,
+  shouldLoadTargetBucket,
+  shouldSwitchToTargetBucket,
+  generateBucketTileKey
+} from '../../utils/bucketUtils';
 
 // 瓦片几何信息缓存接口
 interface TileGeometry {
@@ -86,29 +93,30 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   // 重绘标志
   const redrawFlag = useRef(false);
 
-  // 页面级别的渲染状态管理
-  const [pageRenderState, setPageRenderState] = useState<{
-    highResReady: boolean;
-    lowResReady: boolean;
-    lastRenderedScale: number;
-    lastCheckTime: number;
-  }>({
-    highResReady: false,
-    lowResReady: false,
-    lastRenderedScale: -1,
-    lastCheckTime: 0
+  // 页面级别的渲染状态管理 - 使用新的桶策略
+  const [pageRenderState, setPageRenderState] = useState<PageRenderState>(() => {
+    const buckets = generateRenderBuckets(viewState.scale);
+    return {
+      targetBucket: buckets.find(b => b.isTarget)!,
+      activeBucket: null,
+      availableBuckets: [],
+      lastStillTime: Date.now(),
+      needsFadeTransition: false,
+    };
   });
 
   // 缩放变化时重置渲染状态
   useEffect(() => {
     lastRenderStateRef.current = null;
     lastTileScaleRef.current = -1;
-    // 重置页面渲染状态
+    // 重置页面渲染状态 - 使用新的桶策略
+    const buckets = generateRenderBuckets(viewState.scale);
     setPageRenderState({
-      highResReady: false,
-      lowResReady: false,
-      lastRenderedScale: -1,
-      lastCheckTime: 0
+      targetBucket: buckets.find(b => b.isTarget)!,
+      activeBucket: null,
+      availableBuckets: [],
+      lastStillTime: Date.now(),
+      needsFadeTransition: false,
     });
   }, [viewState.scale]);
   
@@ -256,22 +264,20 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     return false;
   }, [viewState.scale, devicePixelRatio, pageWidth, pageHeight]);
 
-  // 检查整页瓦片完整性
-  const checkPageTilesReady = useCallback((isHighRes: boolean = true) => {
+  // 检查指定桶的整页瓦片完整性
+  const checkBucketTilesReady = useCallback((bucket: RenderBucket) => {
     const tileGeometry = computeTileGeometry();
     let allTilesReady = true;
     
     for (const tile of tileGeometry) {
       const { tx, ty } = tile;
-      const tileInfo: TileInfo = {
+      const tileKey = generateBucketTileKey(bucket, {
         id: pdfMetadata.id,
         page: pageIndex,
-        scale: Math.round(viewState.scale * (isHighRes ? 1 : POSTER_SCALE_FACTOR) * 100) / 100,
         tx,
         ty,
-      };
+      });
       
-      const tileKey = `${isHighRes ? 'highres' : 'lowres'}_${generateTileKey(tileInfo)}`;
       const tileState = getTileState(tileKey);
       const bitmap = bitmapCacheRef.current.get(tileKey);
       
@@ -282,7 +288,13 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     }
     
     return allTilesReady;
-  }, [pdfMetadata.id, pageIndex, viewState.scale, computeTileGeometry, getTileState, bitmapCacheRef]);
+  }, [pdfMetadata.id, pageIndex, computeTileGeometry, getTileState, bitmapCacheRef]);
+
+  // 获取所有可用的桶
+  const getAvailableBuckets = useCallback(() => {
+    const allBuckets = generateRenderBuckets(viewState.scale);
+    return allBuckets.filter(bucket => checkBucketTilesReady(bucket));
+  }, [viewState.scale, checkBucketTilesReady]);
 
   // 重建静态背景
   const rebuildStaticBackground = useCallback(() => {
@@ -382,8 +394,8 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     
     // 滚动中直接使用缓存，早退（特别是已有高清版本的页面）
     if (isScrolling && cacheCanvas.width > 0 && !needsFullRender()) {
-      // 如果当前页面已经有高清版本，滚动时直接使用缓存
-      if (pageRenderState.highResReady && pageRenderState.lastRenderedScale === viewState.scale) {
+      // 如果当前页面已经有可用的桶，滚动时直接使用缓存
+      if (pageRenderState.activeBucket) {
         ctx.clearRect(0, 0, actualWidth, actualHeight);
         ctx.drawImage(cacheCanvas, 0, 0);
         return;
@@ -409,130 +421,142 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     // 获取瓦片几何信息
     const tileGeometry = computeTileGeometry();
 
-    // 检查整页瓦片完整性
-    const highResReady = checkPageTilesReady(true);
-    const lowResReady = checkPageTilesReady(false);
-    
-    // 更新页面渲染状态
+    // 使用新的桶策略
     const currentScale = viewState.scale;
     const currentTime = Date.now();
-    if (pageRenderState.lastRenderedScale !== currentScale) {
-      setPageRenderState({
-        highResReady,
-        lowResReady,
-        lastRenderedScale: currentScale,
-        lastCheckTime: currentTime
-      });
+    const allBuckets = generateRenderBuckets(currentScale);
+    const availableBuckets = getAvailableBuckets();
+    
+    // 更新静止时间
+    const isCurrentlyStill = !isScrolling;
+    const newStillTime = isCurrentlyStill ? pageRenderState.lastStillTime : currentTime;
+    const stillDuration = isCurrentlyStill ? currentTime - pageRenderState.lastStillTime : 0;
+    
+    // 选择最佳可用桶作为占位图
+    const bestAvailableBucket = selectBestAvailableBucket(availableBuckets, currentScale);
+    const targetBucket = allBuckets.find(b => b.isTarget)!;
+    const targetBucketReady = availableBuckets.some(b => b.isTarget);
+    
+    // 决定是否需要切换到目标桶
+    const shouldSwitchToTarget = shouldSwitchToTargetBucket(
+      pageRenderState.activeBucket,
+      targetBucket,
+      isCurrentlyStill,
+      stillDuration,
+      targetBucketReady
+    );
+    
+    // 确定当前应该显示的桶
+    let activeBucket: RenderBucket | null = null;
+    if (shouldSwitchToTarget) {
+      activeBucket = targetBucket;
+    } else if (bestAvailableBucket) {
+      activeBucket = bestAvailableBucket;
+    } else {
+      activeBucket = pageRenderState.activeBucket; // 保持当前桶
     }
-
-    // 决定渲染策略：优先使用已有的高清瓦片
-    let shouldRenderHighRes = highResReady; // 如果高清瓦片准备好，始终优先使用
-    let shouldRenderLowRes = !highResReady && lowResReady; // 只有高清未准备好时才使用低清
     
-    // 滚动时的特殊处理：如果已经有高清瓦片，继续使用高清
-    if (isScrolling && pageRenderState.highResReady && pageRenderState.lastRenderedScale === currentScale) {
-      shouldRenderHighRes = true;
-      shouldRenderLowRes = false;
+    // 更新页面渲染状态
+    if (pageRenderState.activeBucket !== activeBucket || !isCurrentlyStill) {
+      setPageRenderState(prev => ({
+        ...prev,
+        activeBucket,
+        availableBuckets,
+        lastStillTime: newStillTime,
+        needsFadeTransition: shouldSwitchToTarget,
+      }));
     }
     
-    // 调试信息（可选择性启用）
-    // const tileCount = tileGeometry.length;
-    // console.log(`页面 ${pageIndex + 1} 渲染状态: 高清=${highResReady}(${tileCount}瓦片), 低清=${lowResReady}, 滚动=${isScrolling}, 渲染=${shouldRenderHighRes ? '高清' : shouldRenderLowRes ? '低清' : '跳过'}`);
-    
-    // 如果都没准备好，保持当前缓存内容
-    if (!shouldRenderHighRes && !shouldRenderLowRes) {
-      // 只有缓存存在时才绘制，避免空白闪烁
+    // 如果没有可用的桶，保持当前缓存内容
+    if (!activeBucket) {
       if (cacheCanvas.width > 0 && cacheCanvas.height > 0) {
         ctx.drawImage(cacheCanvas, 0, 0);
       }
       return;
     }
+    
+    // 调试信息
+    // console.log(`页面 ${pageIndex + 1} 桶策略: 活动桶=${activeBucket.key}(${activeBucket.scale.toFixed(2)}), 可用桶=${availableBuckets.length}, 静止=${isCurrentlyStill}, 切换=${shouldSwitchToTarget}`);
 
     // 整页替换时清除缓存，重新绘制静态背景
     cacheCtx.drawImage(getStaticBackgroundCanvas(), 0, 0);
 
-    // 绘制瓦片（整页替换）
+    // 绘制当前活动桶的瓦片
     for (const tile of tileGeometry) {
       const { tx, ty, tileX, tileY, renderWidth, renderHeight } = tile;
       
-      // 高清瓦片信息
-      const highResTileInfo: TileInfo = {
+      // 生成当前活动桶的瓦片键
+      const activeTileKey = generateBucketTileKey(activeBucket, {
         id: pdfMetadata.id,
         page: pageIndex,
-        scale: Math.round(viewState.scale * 100) / 100,
         tx,
         ty,
-      };
+      });
       
-      // 低清瓦片信息
-      const lowResTileInfo: TileInfo = {
-        id: pdfMetadata.id,
-        page: pageIndex,
-        scale: Math.round(viewState.scale * POSTER_SCALE_FACTOR * 100) / 100,
-        tx,
-        ty,
-      };
-
-      const highResKey = `highres_${generateTileKey(highResTileInfo)}`;
-      const lowResKey = `lowres_${generateTileKey(lowResTileInfo)}`;
-      const highResTileState = getTileState(highResKey);
-      const lowResTileState = getTileState(lowResKey);
+      const activeBitmap = bitmapCacheRef.current.get(activeTileKey);
+      const activeTileState = getTileState(activeTileKey);
       
-      const highResUrl = getTileUrl(highResTileInfo, devicePixelRatio, true);
-      const lowResUrl = getTileUrl(lowResTileInfo, devicePixelRatio, false);
-
-      // 根据整页准备状态绘制瓦片
-      const highResBitmap = bitmapCacheRef.current.get(highResKey);
-      const lowResBitmap = bitmapCacheRef.current.get(lowResKey);
-
-      if (shouldRenderHighRes && highResBitmap && highResTileState.loaded) {
-        paintTile(cacheCtx, highResBitmap, tileX, tileY, renderWidth, renderHeight);
-      } else if (shouldRenderLowRes && lowResBitmap && lowResTileState.loaded) {
-        cacheCtx.imageSmoothingEnabled = true; // 低清瓦片使用平滑缩放
-        paintTile(cacheCtx, lowResBitmap, tileX, tileY, renderWidth, renderHeight);
+      // 绘制当前活动桶的瓦片
+      if (activeBitmap && activeTileState.loaded) {
+        // 根据桶的缩放因子决定是否使用平滑缩放
+        const needsSmoothing = activeBucket.scale < currentScale;
+        cacheCtx.imageSmoothingEnabled = needsSmoothing;
+        paintTile(cacheCtx, activeBitmap, tileX, tileY, renderWidth, renderHeight);
         cacheCtx.imageSmoothingEnabled = false;
       }
-
-      // 加载高清瓦片（优先级策略：非滚动时或页面尚未有高清版本时）
-      const shouldLoadHighRes = !highResTileState.loading && !highResBitmap && 
-        (!isScrolling || !pageRenderState.highResReady);
-      if (shouldLoadHighRes) {
-        updateTileState(highResKey, { loading: true });
-        scheduleLoad(async () => {
-          try {
-            await loadBitmap(highResUrl, highResKey);
-            updateTileState(highResKey, { loaded: true, loading: false });
-            // 检查是否整页高清瓦片都已完成，如果是则触发重绘
-            setTimeout(() => {
-              if (checkPageTilesReady(true)) {
-                requestRedraw();
-              }
-            }, 0);
-          } catch (error) {
-            console.warn('Failed to load high-res tile:', highResTileInfo);
-            updateTileState(highResKey, { loading: false });
-          }
+    }
+    
+    // 后台加载策略：为所有桶加载瓦片
+    for (const bucket of allBuckets) {
+      // 决定是否应该加载这个桶的瓦片
+      const shouldLoadBucket = shouldLoadTargetBucket(activeBucket, bucket, currentScale) ||
+        bucket === activeBucket; // 总是确保活动桶的瓦片完整
+      
+      if (!shouldLoadBucket) continue;
+      
+      for (const tile of tileGeometry) {
+        const { tx, ty } = tile;
+        
+        const tileKey = generateBucketTileKey(bucket, {
+          id: pdfMetadata.id,
+          page: pageIndex,
+          tx,
+          ty,
         });
-      }
-
-      // 加载低清瓦片
-      if (!highResBitmap && !lowResTileState.loading && !lowResBitmap) {
-        updateTileState(lowResKey, { loading: true });
-        scheduleLoad(async () => {
-          try {
-            await loadBitmap(lowResUrl, lowResKey);
-            updateTileState(lowResKey, { loaded: true, loading: false });
-            // 检查是否整页低清瓦片都已完成，如果是则触发重绘
-            setTimeout(() => {
-              if (checkPageTilesReady(false)) {
-                requestRedraw();
-              }
-            }, 0);
-          } catch (error) {
-            console.warn('Failed to load low-res tile:', lowResTileInfo);
-            updateTileState(lowResKey, { loading: false });
-          }
-        });
+        
+        const tileState = getTileState(tileKey);
+        const bitmap = bitmapCacheRef.current.get(tileKey);
+        
+        // 如果瓦片尚未加载且不在加载中，启动加载
+        if (!bitmap && !tileState.loading) {
+          const tileInfo: TileInfo = {
+            id: pdfMetadata.id,
+            page: pageIndex,
+            scale: Math.round(bucket.scale * 100) / 100,
+            tx,
+            ty,
+          };
+          
+          const tileUrl = getTileUrl(tileInfo, devicePixelRatio, bucket.isTarget);
+          
+          updateTileState(tileKey, { loading: true });
+          scheduleLoad(async () => {
+            try {
+              await loadBitmap(tileUrl, tileKey);
+              updateTileState(tileKey, { loaded: true, loading: false });
+              
+              // 检查是否该桶的整页瓦片都已完成
+              setTimeout(() => {
+                if (checkBucketTilesReady(bucket)) {
+                  requestRedraw();
+                }
+              }, 0);
+            } catch (error) {
+              console.warn(`Failed to load ${bucket.key} tile:`, tileInfo);
+              updateTileState(tileKey, { loading: false });
+            }
+          });
+        }
       }
     }
 
@@ -556,7 +580,8 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     rebuildStaticBackground,
     computeTileGeometry,
     paintTile,
-    checkPageTilesReady,
+    checkBucketTilesReady,
+    getAvailableBuckets,
     pageRenderState
   ]);
 

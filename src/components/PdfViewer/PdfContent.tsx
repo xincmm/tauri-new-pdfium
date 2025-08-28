@@ -7,15 +7,17 @@ import {
   PageLayout, 
   TileInfo,
   TILE_SIZE,
-  PageTextLayout,
-  POSTER_SCALE_FACTOR
+  PageTextLayout
 } from '../../types/pdf';
 import { usePdfState } from '../../hooks/usePdfState';
 import { getVisiblePages, getExpandedVisiblePages } from '../../utils/pdfLayout';
 import { 
-  getTileUrl, 
-  generateTileKey, 
+  getTileUrl
 } from '../../utils/tileUtils';
+import {
+  generateRenderBuckets,
+  generateBucketTileKey
+} from '../../utils/bucketUtils';
 import { PdfTextLayer } from './PdfTextLayer';
 import { PageCanvas } from './PageCanvas';
 
@@ -130,35 +132,47 @@ export const PdfContent: React.FC<PdfContentProps> = ({
         const endTileX = Math.ceil(wPx / backendTileSize);
         const endTileY = Math.ceil(hPx / backendTileSize);
 
+        // 使用新的桶策略进行预加载
+        const buckets = generateRenderBuckets(viewState.scale);
+        
         for (let tx = 0; tx < endTileX; tx++) {
           for (let ty = 0; ty < endTileY; ty++) {
-            // 低清瓦片预加载
-            const lowResTileInfo: TileInfo = {
-              id: pdfMetadata.id,
-              page: pageIndex,
-              scale: Math.round(viewState.scale * POSTER_SCALE_FACTOR * 100) / 100,
-              tx,
-              ty,
-            };
-
-            const lowResKey = `lowres_${generateTileKey(lowResTileInfo)}`;
-            const lowResTileState = pdfState.getTileState(lowResKey);
-            const lowResUrl = getTileUrl(lowResTileInfo, devicePixelRatio, false);
-
-            if (!lowResTileState.loading && !bitmapCacheRef.current.has(lowResKey)) {
-              pdfState.updateTileState(lowResKey, { loading: true });
-              scheduleLoad(async () => {
-                try {
-                  const response = await fetch(lowResUrl, { cache: 'force-cache' });
-                  const blob = await response.blob();
-                  const bitmap = await createImageBitmap(blob);
-                  bitmapCacheRef.current.set(lowResKey, bitmap);
-                  pdfState.updateTileState(lowResKey, { loaded: true, loading: false });
-                } catch (error) {
-                  console.warn('Failed to preload low-res tile:', lowResTileInfo);
-                  pdfState.updateTileState(lowResKey, { loading: false });
-                }
+            // 为所有桶预加载瓦片，优先加载低清桶
+            for (const bucket of buckets.reverse()) { // reverse让低清桶优先
+              const tileKey = generateBucketTileKey(bucket, {
+                id: pdfMetadata.id,
+                page: pageIndex,
+                tx,
+                ty,
               });
+              
+              const tileState = pdfState.getTileState(tileKey);
+              
+              if (!tileState.loading && !bitmapCacheRef.current.has(tileKey)) {
+                const tileInfo: TileInfo = {
+                  id: pdfMetadata.id,
+                  page: pageIndex,
+                  scale: Math.round(bucket.scale * 100) / 100,
+                  tx,
+                  ty,
+                };
+                
+                const tileUrl = getTileUrl(tileInfo, devicePixelRatio, bucket.isTarget);
+                
+                pdfState.updateTileState(tileKey, { loading: true });
+                scheduleLoad(async () => {
+                  try {
+                    const response = await fetch(tileUrl, { cache: 'force-cache' });
+                    const blob = await response.blob();
+                    const bitmap = await createImageBitmap(blob);
+                    bitmapCacheRef.current.set(tileKey, bitmap);
+                    pdfState.updateTileState(tileKey, { loaded: true, loading: false });
+                  } catch (error) {
+                    console.warn(`Failed to preload ${bucket.key} tile:`, tileInfo);
+                    pdfState.updateTileState(tileKey, { loading: false });
+                  }
+                });
+              }
             }
           }
         }
