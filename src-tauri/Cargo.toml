@@ -28,6 +28,7 @@ url = "2.5"
 crossbeam-channel = "0.5"
 uuid = { version = "1.8", features = ["v4"] }
 webp = "0.2"
+rayon = "1.7"
 
 
 tauri = { version = "2", features = ["devtools"] }

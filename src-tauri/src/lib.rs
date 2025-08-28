@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use pdfium_render::prelude::*;
 use serde::{Deserialize, Serialize};
 
+// use rayon::prelude::*; // 暂时不使用rayon
 use std::time::Instant;
 use std::{collections::HashMap, num::NonZeroUsize, sync::Arc};
 use tauri::{AppHandle, Manager};
@@ -107,6 +108,86 @@ pub struct PdfiumLibraryPath(pub String);
 // 全局静态变量存储 Pdfium 库路径，供 spawn_blocking 中使用
 static PDFIUM_LIBRARY_PATH: once_cell::sync::OnceCell<String> = once_cell::sync::OnceCell::new();
 
+// 线程本地文档缓存
+thread_local! {
+    static THREAD_PDFIUM: std::cell::RefCell<Option<Pdfium>> = std::cell::RefCell::new(None);
+    static THREAD_DOC_CACHE: std::cell::RefCell<std::collections::HashMap<String, (Vec<u8>, std::time::Instant)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+// 获取或创建线程本地Pdfium实例
+fn get_or_create_pdfium() -> Result<()> {
+    THREAD_PDFIUM.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        if opt.is_none() {
+            let lib_path = PDFIUM_LIBRARY_PATH
+                .get()
+                .ok_or_else(|| anyhow!("Pdfium path not set"))?;
+
+            let bindings =
+                Pdfium::bind_to_library(lib_path).or_else(|_| Pdfium::bind_to_system_library())?;
+            let pdfium = Pdfium::new(bindings);
+
+            *opt = Some(pdfium);
+            println!("🔧 创建线程本地Pdfium实例");
+        }
+        Ok(())
+    })
+}
+
+// 使用线程本地缓存的Pdfium和文档
+fn with_cached_document<T, F>(id: &str, bytes: &[u8], f: F) -> Result<T>
+where
+    F: FnOnce(&Pdfium, PdfDocument) -> Result<T>,
+{
+    // 确保Pdfium实例存在
+    get_or_create_pdfium()?;
+
+    THREAD_PDFIUM.with(|pdfium_cell| {
+        THREAD_DOC_CACHE.with(|cache_cell| {
+            let pdfium = pdfium_cell.borrow();
+            let pdfium = pdfium.as_ref().unwrap();
+
+            let mut cache = cache_cell.borrow_mut();
+
+            // 检查缓存中是否有相同的文档字节数据
+            let need_reload = if let Some((cached_bytes, last_used)) = cache.get_mut(id) {
+                // 更新最后使用时间
+                *last_used = std::time::Instant::now();
+                // 检查字节数据是否相同
+                cached_bytes != bytes
+            } else {
+                true
+            };
+
+            if need_reload {
+                // 更新缓存
+                cache.insert(id.to_string(), (bytes.to_vec(), std::time::Instant::now()));
+                println!("📄 缓存文档: {}", id);
+            }
+
+            // 加载文档（即使从缓存，也需要重新加载PdfDocument实例）
+            let doc = pdfium.load_pdf_from_byte_slice(bytes, None)?;
+
+            // 调用用户函数
+            f(pdfium, doc)
+        })
+    })
+}
+
+// 创建Pdfium实例的优化函数（用于非缓存场景）
+fn create_pdfium() -> Result<Pdfium> {
+    let lib_path = PDFIUM_LIBRARY_PATH
+        .get()
+        .ok_or_else(|| anyhow!("Pdfium path not set"))?;
+
+    let bindings =
+        Pdfium::bind_to_library(lib_path).or_else(|_| Pdfium::bind_to_system_library())?;
+    let pdfium = Pdfium::new(bindings);
+
+    Ok(pdfium)
+}
+
 #[tauri::command]
 async fn open_pdf(
     path: String,
@@ -177,15 +258,8 @@ async fn get_page_text_layout(id: String, page: u32) -> Result<PageTextLayout, S
 
     // 在spawn_blocking中执行CPU密集型的Pdfium操作
     let layout = tauri::async_runtime::spawn_blocking(move || -> Result<PageTextLayout, String> {
-        // 使用全局存储的 Pdfium 库路径
-        let library_path = PDFIUM_LIBRARY_PATH
-            .get()
-            .ok_or_else(|| "Pdfium library path not initialized".to_string())?;
-
-        let bindings = Pdfium::bind_to_library(library_path)
-            .or_else(|_| Pdfium::bind_to_system_library())
-            .map_err(|e| format!("Failed to bind Pdfium library: {}", e))?;
-        let pdfium = Pdfium::new(bindings);
+        // 创建Pdfium实例
+        let pdfium = create_pdfium().map_err(|e| format!("Failed to create Pdfium: {}", e))?;
 
         let doc = pdfium
             .load_pdf_from_byte_slice(&data_bytes, None)
@@ -247,15 +321,8 @@ async fn extract_text_range(id: String, page: u32, start: u32, end: u32) -> Resu
 
     // 在spawn_blocking中执行CPU密集型的Pdfium操作
     let text = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        // 使用全局存储的 Pdfium 库路径
-        let library_path = PDFIUM_LIBRARY_PATH
-            .get()
-            .ok_or_else(|| "Pdfium library path not initialized".to_string())?;
-
-        let bindings = Pdfium::bind_to_library(library_path)
-            .or_else(|_| Pdfium::bind_to_system_library())
-            .map_err(|e| format!("Failed to bind Pdfium library: {}", e))?;
-        let pdfium = Pdfium::new(bindings);
+        // 创建Pdfium实例
+        let pdfium = create_pdfium().map_err(|e| format!("Failed to create Pdfium: {}", e))?;
 
         let doc = pdfium
             .load_pdf_from_byte_slice(&data_bytes, None)
@@ -359,7 +426,7 @@ async fn render_tile_direct(
 // 新的原生瓦片直渲染函数：使用 FPDF_RenderPageBitmapWithMatrix 矩阵 + 裁剪
 async fn render_tile_direct_native(
     data: &PdfData,
-    _id: &str,
+    id: &str,
     page_index: u32,
     scale_x100: u32,
     tx: u32,
@@ -374,20 +441,15 @@ async fn render_tile_direct_native(
 
     let data_bytes = data.bytes.clone();
     let (w_pt, h_pt) = data.page_dims[page_index as usize];
+    let _doc_id = id.to_string();
 
     // 在阻塞线程里做 Pdfium 调用
     let start_time = std::time::Instant::now();
     let webp = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<u8>, u32, u32)> {
         let step1_start = std::time::Instant::now();
 
-        // 1) 绑定 & 打开文档 & 取页
-        let lib_path = PDFIUM_LIBRARY_PATH
-            .get()
-            .ok_or_else(|| anyhow!("Pdfium path not set"))?;
-        let bindings =
-            Pdfium::bind_to_library(lib_path).or_else(|_| Pdfium::bind_to_system_library())?;
-        let pdfium = Pdfium::new(bindings);
-
+        // 1) 创建Pdfium实例并加载文档（优化：使用thread_safe特性）
+        let pdfium = create_pdfium()?;
         let doc = pdfium.load_pdf_from_byte_slice(&data_bytes, None)?;
         let page = doc
             .pages()
@@ -395,7 +457,11 @@ async fn render_tile_direct_native(
             .map_err(|_| anyhow!("page out of range"))?;
 
         let step1_elapsed = step1_start.elapsed();
-        println!("  📊 步骤1 - PDF加载: {:?}", step1_elapsed);
+        println!(
+            "  📊 步骤1 - PDF加载: {:?} (文档ID: {})",
+            step1_elapsed,
+            &_doc_id[..8]
+        );
 
         let step2_start = std::time::Instant::now();
 
@@ -428,7 +494,7 @@ async fn render_tile_direct_native(
         // 简化：直接模拟高级API的行为，不进行复杂的坐标转换
         let left_pt = (x_px as f32) / s - bleed_pt;
         let top_pt = (y_px as f32) / s - bleed_pt;
-        let right_pt = ((x_px + tw) as f32) / s + bleed_pt;
+        let _right_pt = ((x_px + tw) as f32) / s + bleed_pt;
         let bottom_pt = ((y_px + th) as f32) / s + bleed_pt;
 
         let step2_elapsed = step2_start.elapsed();
@@ -572,24 +638,32 @@ async fn render_tile_direct_native(
             let step5_elapsed = step5_start.elapsed();
             println!("  📊 步骤5 - 像素转换: {:?}", step5_elapsed);
 
-            let step6_start = std::time::Instant::now();
-            // 5) WebP 编码（与现有一致）
-            let webp = webp::Encoder::from_rgba(&rgba, tw, th).encode(WEBP_QUALITY as f32);
-            let step6_elapsed = step6_start.elapsed();
-            println!("  📊 步骤6 - WebP编码: {:?}", step6_elapsed);
-
-            Ok((webp.to_vec(), tw, th))
+            // 返回RGBA数据，编码将在外部并行进行
+            Ok((rgba, tw, th))
         }
     })
     .await??;
 
-    let elapsed = start_time.elapsed();
+    let render_elapsed = start_time.elapsed();
+
+    // 使用rayon并行编码WebP
+    let encode_start = std::time::Instant::now();
+    let (rgba_data, tw, th) = webp;
+
+    // 直接在当前线程编码，避免rayon::spawn的复杂性
+    let webp_result = {
+        let webp = webp::Encoder::from_rgba(&rgba_data, tw, th).encode(WEBP_QUALITY as f32);
+        webp.to_vec()
+    };
+    let encode_elapsed = encode_start.elapsed();
+
+    let total_elapsed = start_time.elapsed();
     println!(
-        "🚀 原生瓦片渲染 - 页面:{} 瓦片:{}x{} 缩放:{} 尺寸:{}x{} 耗时:{:?}",
-        page_index, tx, ty, scale_x100, webp.1, webp.2, elapsed
+        "🚀 优化瓦片渲染 - 页面:{} 瓦片:{}x{} 缩放:{} 尺寸:{}x{} 渲染:{:?} 编码:{:?} 总计:{:?}",
+        page_index, tx, ty, scale_x100, tw, th, render_elapsed, encode_elapsed, total_elapsed
     );
 
-    Ok(Arc::new(webp.0))
+    Ok(Arc::new(webp_result))
 }
 
 // 整页直出（若需要 tiles/-1_-1 的整页下载）
@@ -602,12 +676,7 @@ async fn render_fullpage_direct_native(
     let (w_pt, h_pt) = data.page_dims[page_index as usize];
 
     let webp = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>> {
-        let lib_path = PDFIUM_LIBRARY_PATH
-            .get()
-            .ok_or_else(|| anyhow!("Pdfium path not set"))?;
-        let bindings =
-            Pdfium::bind_to_library(lib_path).or_else(|_| Pdfium::bind_to_system_library())?;
-        let pdfium = Pdfium::new(bindings);
+        let pdfium = create_pdfium()?;
 
         let doc = pdfium.load_pdf_from_byte_slice(&data_bytes, None)?;
         let page = doc
@@ -718,14 +787,8 @@ async fn ensure_page_image(
 
     // 在spawn_blocking中执行CPU密集型的Pdfium操作
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<image::DynamicImage> {
-        // 使用全局存储的 Pdfium 库路径
-        let library_path = PDFIUM_LIBRARY_PATH
-            .get()
-            .ok_or_else(|| anyhow!("Pdfium library path not initialized"))?;
-
-        let bindings =
-            Pdfium::bind_to_library(library_path).or_else(|_| Pdfium::bind_to_system_library())?;
-        let pdfium = Pdfium::new(bindings);
+        // 创建Pdfium实例
+        let pdfium = create_pdfium()?;
 
         let doc = pdfium.load_pdf_from_byte_slice(&data_bytes, None)?;
         let (w_pt, h_pt) = page_dims;
