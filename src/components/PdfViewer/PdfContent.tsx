@@ -19,7 +19,7 @@ import {
   generateBucketTileKey
 } from '../../utils/bucketUtils';
 import { PdfTextLayer } from './PdfTextLayer';
-import { PageCanvas } from './PageCanvas';
+import { PageCanvas, syncWorkerEpoch } from './PageCanvas';
 import { ScrollMetrics } from './hooks/useScrollHandler';
 import { LoadTask, PriorityTaskQueue } from '../../utils/taskQueue';
 import { performanceMonitor } from '../../utils/performanceMonitor';
@@ -37,8 +37,8 @@ interface PdfContentProps {
   getScrollMetrics: () => ScrollMetrics;
 }
 
-// 全局优先级任务队列
-const globalTaskQueue = new PriorityTaskQueue(32);
+// 全局优先级任务队列 - 降低并发数
+const globalTaskQueue = new PriorityTaskQueue(8);
 
 export const PdfContent: React.FC<PdfContentProps> = ({
   pdfMetadata,
@@ -132,7 +132,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
     return distances[0]?.pageIndex || null;
   }, [containerRef, pageLayouts, viewState.scrollY]);
 
-  // 快速滚动检测和焦点页面管理
+  // 快速滚动检测和焦点页面管理 - 添加Epoch机制
   useEffect(() => {
     const scrollMetrics = getScrollMetrics();
     const isRapidScrolling = Math.abs(scrollMetrics.velocity.vy) > 2; // 速度阈值 2px/ms
@@ -141,7 +141,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
       const currentFocusPage = detectFocusPage();
       
       if (isRapidScrolling) {
-        // 快速滚动时，更新焦点页面
+        // 快速滚动时，使用更温和的清理策略
         if (currentFocusPage !== lastFocusPageRef.current) {
           console.log(`快速滚动检测到焦点页面变化: ${lastFocusPageRef.current} -> ${currentFocusPage}`);
           
@@ -151,11 +151,28 @@ export const PdfContent: React.FC<PdfContentProps> = ({
           // 设置全局任务队列的焦点页面
           globalTaskQueue.setFocusPage(currentFocusPage);
           
-          // 取消非焦点页面的加载任务
-          globalTaskQueue.cancelNonFocusTasks();
+          // 取消远离当前焦点的任务，必要时进行紧急清理
+          const visiblePageIndices = visiblePages.map(p => p.pageIndex);
+          const minVisible = Math.min(...visiblePageIndices);
+          const maxVisible = Math.max(...visiblePageIndices);
+          const buffer = 3; // 保护前后3页
+          
+          // 先尝试温和的范围清理
+          globalTaskQueue.cancelTasksOutsidePageRange(
+            minVisible - buffer, 
+            maxVisible + buffer
+          );
+          
+          // 检查是否需要紧急清理（队列过载时）
+          const emergencyCleanupPerformed = globalTaskQueue.checkAndEmergencyCleanup(visiblePageIndices);
+          if (emergencyCleanupPerformed) {
+            syncWorkerEpoch(globalTaskQueue.getCurrentEpoch());
+          }
+          
+          console.log(`🚀 快速滚动，焦点页面 ${(currentFocusPage ?? -1) + 1}，保护范围 [${minVisible - buffer + 1}, ${maxVisible + buffer + 1}]`);
         }
       } else {
-        // 慢速滚动时，也更新焦点页面但不取消其他任务
+        // 慢速滚动时，也更新焦点页面但不推进Epoch
         if (currentFocusPage !== lastFocusPageRef.current) {
           setFocusPageIndex(currentFocusPage);
           lastFocusPageRef.current = currentFocusPage;
@@ -163,11 +180,21 @@ export const PdfContent: React.FC<PdfContentProps> = ({
         }
       }
     } else {
-      // 停止滚动时，清除焦点页面限制，恢复正常加载
+      // 停止滚动时，只清除焦点页面限制，不推进Epoch
       if (focusPageIndex !== null) {
         console.log('滚动停止，清除焦点页面限制');
+        
         setFocusPageIndex(null);
         globalTaskQueue.setFocusPage(null);
+        
+        // 不推进Epoch，让当前可见页面继续加载
+        console.log('🛑 滚动停止，保持当前Epoch，允许可见页面继续加载');
+        
+        // 立即触发可见页面的加载（防止白屏）
+        setTimeout(() => {
+          console.log('🔄 滚动停止后立即开始加载可见页面');
+          // 这里会触发useEffect中的预加载逻辑
+        }, 50);
       }
     }
   }, [isScrolling, getScrollMetrics, detectFocusPage, focusPageIndex]);
@@ -227,6 +254,8 @@ export const PdfContent: React.FC<PdfContentProps> = ({
                   id: tileKey,
                   priority: bucket.isTarget ? 100 : 200, // 目标桶优先级更高
                   pageIndex,
+                  epoch: globalTaskQueue.getCurrentEpoch(), // 添加当前Epoch
+                  bucketKey: bucket.key, // 添加桶键
                   execute: async () => {
                     try {
                       const fetchStart = performance.now();
@@ -648,6 +677,8 @@ export const PdfContent: React.FC<PdfContentProps> = ({
                 <div>焦点页面: {focusPageIndex !== null ? `页面 ${focusPageIndex + 1}` : '无'}</div>
                 <div>队列待处理: {queueStatus.pending}</div>
                 <div>正在执行: {queueStatus.running}</div>
+                <div>当前Epoch: {queueStatus.currentEpoch}</div>
+                <div>最大并发: {queueStatus.maxConcurrency}</div>
                 <div>滚动状态: {isScrolling ? '滚动中' : '静止'}</div>
                 <div>滚动速度: {Math.abs(scrollMetrics.velocity.vy).toFixed(1)} px/ms</div>
                 <div>可见页面: {visiblePages.map(p => p.pageIndex + 1).join(', ')}</div>
