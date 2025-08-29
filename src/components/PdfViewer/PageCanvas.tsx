@@ -473,49 +473,59 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   useEffect(() => {
     if (!globalTaskQueue) return;
     
-    const addPageTasks = () => {
-      const reason = isScrolling ? 'scrolling-preload' : 'scroll-stopped';
-      const neededTasks = collectNeededTasks(reason);
-      
-             // 滚动中的预加载策略：降低优先级，减少数量
+         const addPageTasks = () => {
+       const reason = isScrolling ? 'scrolling-preload' : 'scroll-stopped';
+       let neededTasks = collectNeededTasks(reason);
+       
+       // 严格控制滚动中的任务添加 - 防止队列爆炸
        if (isScrolling) {
-         // 预加载页面在快速滚动时完全跳过
+         // 滚动中只处理当前可见页面，完全跳过预加载页面
          if (isPreloadPage) {
+           console.log(`🚫 滚动中跳过预加载页面 ${pageIndex + 1}`);
+           return; // 快速滚动时完全跳过所有预加载页面
+         }
+         
+         // 滚动中只为焦点页面加载关键瓦片
+         if (!isFocusPage) {
            const scrollMetrics = getScrollMetrics?.();
-           const isSlowScroll = scrollMetrics && Math.abs(scrollMetrics.velocity.vy) < 1;
-           if (!isSlowScroll) {
-             return; // 快速滚动时跳过所有预加载页面
+           const isVerySlowScroll = scrollMetrics && Math.abs(scrollMetrics.velocity.vy) < 0.5;
+           if (!isVerySlowScroll) {
+             console.log(`🚫 滚动中跳过非焦点页面 ${pageIndex + 1} (速度: ${scrollMetrics?.velocity.vy})`);
+             return; // 非极慢滚动时跳过非焦点页面
            }
          }
          
-         // 只为焦点页面和临近可见页面预加载
-         const scrollMetrics = getScrollMetrics?.();
-         const isNearVisible = scrollMetrics && Math.abs(scrollMetrics.velocity.vy) < 2; // 慢速滚动
+         // 滚动中只加载目标桶，跳过备选桶
+         const originalCount = neededTasks.length;
+         neededTasks = neededTasks.filter(task => {
+           // 只保留目标桶的任务，通过priority判断
+           return task.priority < 150; // 目标桶priority通常是100左右
+         });
          
-         if (!isFocusPage && !isNearVisible && !isPreloadPage) {
-           return; // 快速滚动时跳过非焦点页面
+         if (originalCount > neededTasks.length) {
+           console.log(`🔥 滚动中过滤任务: ${originalCount} → ${neededTasks.length} (页面${pageIndex + 1})`);
          }
          
-         // 降低滚动中任务的优先级
+         // 进一步降低优先级
          neededTasks.forEach(task => {
-           task.priority += 500; // 滚动预加载优先级较低
-           if (isPreloadPage) {
-             task.priority += 300; // 预加载页面额外降低优先级
-           }
+           task.priority += 800; // 滚动中任务大幅降低优先级
          });
        }
-      
-      for (const task of neededTasks) {
-        globalTaskQueue.addTask({
-          ...task,
-          epoch: globalTaskQueue.getCurrentEpoch()
-        });
-      }
-      
-      if (neededTasks.length > 0) {
-        console.log(`📋 页面${pageIndex + 1}添加任务 (${reason}): ${neededTasks.length}个`);
-      }
-    };
+       
+       // 如果没有任务需要添加，直接返回
+       if (neededTasks.length === 0) {
+         return;
+       }
+       
+       for (const task of neededTasks) {
+         globalTaskQueue.addTask({
+           ...task,
+           epoch: globalTaskQueue.getCurrentEpoch()
+         });
+       }
+       
+       console.log(`📋 页面${pageIndex + 1}添加任务 (${reason}): ${neededTasks.length}个 ${isPreloadPage ? '[预加载]' : ''}`);
+     };
 
     if (isScrolling) {
       // 滚动中立即添加预加载任务

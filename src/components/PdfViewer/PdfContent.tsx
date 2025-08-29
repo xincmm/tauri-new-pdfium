@@ -8,7 +8,7 @@ import {
   PageTextLayout
 } from '../../types/pdf';
 import { usePdfState } from '../../hooks/usePdfState';
-import { getVisiblePages, getExpandedVisiblePages } from '../../utils/pdfLayout';
+import { getVisiblePages } from '../../utils/pdfLayout';
 // 移除未使用的import
 import { PdfTextLayer } from './PdfTextLayer';
 import { PageCanvas } from './PageCanvas';
@@ -80,19 +80,42 @@ export const PdfContent: React.FC<PdfContentProps> = ({
     return getVisiblePages(pageLayouts, containerHeight, viewState.scrollY);
   }, [pageLayouts, viewState.scrollY, containerRef]);
 
-  // 获取扩展的可见页面（用于预加载）
+  // 智能扩展可见页面：滚动时只包含可见页面，静止时包含相邻预加载页面
   const expandedVisiblePages = React.useMemo(() => {
     if (!containerRef.current) return [];
     
-    const containerHeight = containerRef.current.clientHeight;
-    return getExpandedVisiblePages(
-      pageLayouts, 
-      containerHeight, 
-      viewState.scrollY, 
-      lastScrollY, 
-      2 // PRELOAD_PAGES_AHEAD
-    );
-  }, [pageLayouts, viewState.scrollY, lastScrollY, containerRef]);
+    // 滚动中只返回可见页面，避免队列爆炸
+    if (isScrolling) {
+      console.log(`📱 滚动中只渲染可见页面: [${visiblePages.map(p => p.pageIndex + 1).join(', ')}]`);
+      return visiblePages;
+    }
+    
+    // 静止时添加相邻2页进行预加载
+    if (focusPageIndex !== null) {
+      const preloadPageIndices = new Set<number>();
+      
+      // 添加所有可见页面
+      visiblePages.forEach(page => preloadPageIndices.add(page.pageIndex));
+      
+      // 添加焦点页面的相邻2页
+      for (let offset = -2; offset <= 2; offset++) {
+        const targetPageIndex = focusPageIndex + offset;
+        if (targetPageIndex >= 0 && targetPageIndex < pageLayouts.length) {
+          preloadPageIndices.add(targetPageIndex);
+        }
+      }
+      
+      const expandedPages = Array.from(preloadPageIndices)
+        .sort((a, b) => a - b)
+        .map(pageIndex => pageLayouts[pageIndex]);
+      
+      console.log(`🔮 静止时扩展页面: [${expandedPages.map(p => p.pageIndex + 1).join(', ')}] (焦点: ${focusPageIndex + 1})`);
+      return expandedPages;
+    }
+    
+    // 回退到基本可见页面
+    return visiblePages;
+  }, [pageLayouts, visiblePages, isScrolling, focusPageIndex]);
 
   // 检测焦点页面（视口中心的页面）
   const detectFocusPage = useCallback(() => {
@@ -177,7 +200,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
       globalTaskQueue.reconcile(allNeededTasks, reason); // 清空所有旧任务，开始新轮次
     };
 
-    // 关键时机触发reconcile
+    // 关键时机触发reconcile - 防止队列积攒
     if (!isScrolling) {
       // 滚动停止后触发完整reconcile
       const timeoutId = setTimeout(() => {
@@ -185,10 +208,10 @@ export const PdfContent: React.FC<PdfContentProps> = ({
       }, 100);
       return () => clearTimeout(timeoutId);
     } else {
-      // 滚动过程中的轻量reconcile - 清理过远的任务但保持预加载
+      // 滚动过程中频繁reconcile - 立即清理积攒的任务
       const timeoutId = setTimeout(() => {
-        triggerGlobalReconcile('scrolling-preload');
-      }, 500); // 滚动中较少频次的清理
+        triggerGlobalReconcile('scrolling-cleanup');
+      }, 50); // 滚动中每50ms清理一次，防止队列爆炸
       return () => clearTimeout(timeoutId);
     }
   }, [isScrolling, expandedVisiblePages, viewState.scale]);
@@ -206,6 +229,8 @@ export const PdfContent: React.FC<PdfContentProps> = ({
       globalTaskQueue.setFocusPage(focusPageIndex);
     }
   }, [focusPageIndex]);
+
+  // 静默预加载已通过expandedVisiblePages实现
 
   // 跨页选区处理函数
   const handleGlobalMouseDown = useCallback(() => {
