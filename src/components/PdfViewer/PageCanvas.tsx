@@ -24,6 +24,8 @@ import {
   isTileInOverscanArea
 } from '../../utils/scrollOptimization';
 import { ScrollMetrics } from './hooks/useScrollHandler';
+import { LoadTask, PriorityTaskQueue } from '../../utils/taskQueue';
+import { performanceMonitor } from '../../utils/performanceMonitor';
 
 // 瓦片几何信息缓存接口
 interface TileGeometry {
@@ -35,8 +37,8 @@ interface TileGeometry {
   renderHeight: number;
 }
 
-// 瓦片加载并发控制（本地应用可以使用更高并发）
-const MAX_CONCURRENCY = 16;
+// 瓦片加载并发控制（保留原有的简单队列作为备用）
+const MAX_CONCURRENCY = 32;
 const loadQueue: Array<() => Promise<void>> = [];
 let runningTasks = 0;
 
@@ -69,6 +71,8 @@ interface PageCanvasProps {
   inflightRef: React.MutableRefObject<Set<string>>;
   pdfState: ReturnType<typeof usePdfState>;
   getScrollMetrics?: () => ScrollMetrics;
+  isFocusPage?: boolean; // 是否为焦点页面
+  globalTaskQueue?: PriorityTaskQueue; // 全局任务队列
 }
 
 export const PageCanvas: React.FC<PageCanvasProps> = ({
@@ -82,6 +86,8 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   inflightRef,
   pdfState,
   getScrollMetrics,
+  isFocusPage = false,
+  globalTaskQueue,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cacheCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -165,9 +171,58 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     inflightRef.current.add(key);
     
     try {
+      const fetchStart = performance.now();
       const response = await fetch(url, { cache: 'force-cache' });
+      const fetchEnd = performance.now();
+      
+      const blobStart = performance.now();
       const blob = await response.blob();
+      const blobEnd = performance.now();
+      
+      const bitmapStart = performance.now();
       const bitmap = await createImageBitmap(blob);
+      const bitmapEnd = performance.now();
+      
+      // 记录详细的性能统计
+      const networkTime = fetchEnd - fetchStart;
+      const blobTime = blobEnd - blobStart;
+      const bitmapTime = bitmapEnd - bitmapStart;
+      const totalFrontendTime = bitmapEnd - fetchStart;
+      
+      // 解析并显示详细的服务端时间
+      const serverTimingHeader = response.headers.get('Server-Timing');
+      const pixelHeader = response.headers.get('X-Pixels');
+      const serverTiming = performanceMonitor.parseServerTiming(serverTimingHeader);
+      const pixelInfo = performanceMonitor.parsePixelInfo(pixelHeader);
+      
+      let detailedServerStats = '';
+      if (serverTiming) {
+        detailedServerStats = `
+        🔧 服务端详情: 队列=${serverTiming.queue.toFixed(1)}ms | 设置=${serverTiming.setup.toFixed(1)}ms | 光栅=${serverTiming.raster.toFixed(1)}ms | 打包=${serverTiming.pack.toFixed(1)}ms | 编码=${serverTiming.encode.toFixed(1)}ms | 总计=${serverTiming.total.toFixed(1)}ms`;
+        if (pixelInfo) {
+          const megapixels = (pixelInfo.width * pixelInfo.height) / 1_000_000;
+          detailedServerStats += ` | 像素=${pixelInfo.width}x${pixelInfo.height}(${megapixels.toFixed(2)}MP)`;
+        }
+      }
+      
+      console.log(`🎯 瓦片加载性能 [${key}]: 
+        网络请求: ${networkTime.toFixed(1)}ms 
+        | Blob转换: ${blobTime.toFixed(1)}ms 
+        | ImageBitmap: ${bitmapTime.toFixed(1)}ms 
+        | 总计前端: ${totalFrontendTime.toFixed(1)}ms${detailedServerStats}`);
+      
+      // 记录到性能监控器
+      performanceMonitor.recordTileLoad({
+        tileKey: key,
+        networkTime,
+        blobTime,
+        bitmapTime,
+        totalFrontendTime,
+        serverTiming: serverTiming,
+        pixelInfo: pixelInfo,
+        timestamp: Date.now(),
+        isPreload: false
+      });
       
       bitmapCacheRef.current.set(key, bitmap);
       requestRedraw(); // 触发重绘
@@ -501,7 +556,9 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     }
     
     // 调试信息
-    // console.log(`页面 ${pageIndex + 1} 桶策略: 活动桶=${activeBucket.key}(${activeBucket.scale.toFixed(2)}), 可用桶=${availableBuckets.length}, 静止=${isCurrentlyStill}, 切换=${shouldSwitchToTarget}`);
+    if (isFocusPage) {
+      console.log(`焦点页面 ${pageIndex + 1} 桶策略: 活动桶=${activeBucket.key}(${activeBucket.scale.toFixed(2)}), 可用桶=${availableBuckets.length}, 静止=${isCurrentlyStill}`);
+    }
 
     // 整页替换时清除缓存，重新绘制静态背景
     cacheCtx.drawImage(getStaticBackgroundCanvas(), 0, 0);
@@ -565,9 +622,9 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
           overscanConfig
         );
         
-        // 如果正在快速滚动且瓦片在overscan区域外，跳过加载
+        // 如果正在快速滚动且瓦片在overscan区域外，跳过加载（除非是焦点页面）
         if (isScrolling && !isInOverscan && scrollMetrics && 
-            (Math.abs(scrollMetrics.velocity.vy) > 1)) { // 速度阈值 1px/ms
+            (Math.abs(scrollMetrics.velocity.vy) > 1) && !isFocusPage) { // 焦点页面优先加载
           continue;
         }
         
@@ -594,22 +651,59 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
           const tileUrl = getTileUrl(tileInfo, devicePixelRatio, bucket.isTarget);
           
           updateTileState(tileKey, { loading: true });
-          scheduleLoad(async () => {
-            try {
-              await loadBitmap(tileUrl, tileKey);
-              updateTileState(tileKey, { loaded: true, loading: false });
-              
-              // 检查是否该桶的整页瓦片都已完成
-              setTimeout(() => {
-                if (checkBucketTilesReady(bucket)) {
-                  requestRedraw();
+          
+          // 使用全局优先级队列（如果可用）或回退到简单队列
+          if (globalTaskQueue) {
+            const basePriority = bucket.isTarget ? 100 : 200;
+            const distancePriority = Math.floor(Math.abs((tileY + renderHeight/2) - pageHeight/2) / 10); // 距离权重
+            const finalPriority = basePriority + distancePriority + (isFocusPage ? -1000 : 0); // 焦点页面大幅提升优先级
+            
+            const task: LoadTask = {
+              id: tileKey,
+              priority: finalPriority,
+              pageIndex,
+              execute: async () => {
+                try {
+                  await loadBitmap(tileUrl, tileKey);
+                  updateTileState(tileKey, { loaded: true, loading: false });
+                  
+                  // 检查是否该桶的整页瓦片都已完成
+                  setTimeout(() => {
+                    if (checkBucketTilesReady(bucket)) {
+                      requestRedraw();
+                    }
+                  }, 0);
+                } catch (error) {
+                  console.warn(`Failed to load ${bucket.key} tile:`, tileInfo);
+                  updateTileState(tileKey, { loading: false });
                 }
-              }, 0);
-            } catch (error) {
-              console.warn(`Failed to load ${bucket.key} tile:`, tileInfo);
-              updateTileState(tileKey, { loading: false });
-            }
-          });
+              },
+              cancel: () => {
+                updateTileState(tileKey, { loading: false });
+                inflightRef.current.delete(tileKey);
+              }
+            };
+            
+            globalTaskQueue.addTask(task);
+          } else {
+            // 回退到简单队列
+            scheduleLoad(async () => {
+              try {
+                await loadBitmap(tileUrl, tileKey);
+                updateTileState(tileKey, { loaded: true, loading: false });
+                
+                // 检查是否该桶的整页瓦片都已完成
+                setTimeout(() => {
+                  if (checkBucketTilesReady(bucket)) {
+                    requestRedraw();
+                  }
+                }, 0);
+              } catch (error) {
+                console.warn(`Failed to load ${bucket.key} tile:`, tileInfo);
+                updateTileState(tileKey, { loading: false });
+              }
+            });
+          }
         }
       }
     }
@@ -636,7 +730,9 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     paintTile,
     checkBucketTilesReady,
     getAvailableBuckets,
-    pageRenderState
+    pageRenderState,
+    isFocusPage,
+    globalTaskQueue
   ]);
 
   // 当需要重绘时执行
@@ -661,6 +757,11 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
         contentVisibility: 'auto',
         contain: 'strict',
         willChange: 'transform',
+        // 焦点页面提升渲染优先级
+        ...(isFocusPage && {
+          zIndex: 1,
+          opacity: 1,
+        }),
       }}
     />
   );

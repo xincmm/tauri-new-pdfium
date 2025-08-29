@@ -19,7 +19,7 @@ pub enum PdfCmd {
         scale_x100: u32,
         tx_idx: u32,
         ty_idx: u32,
-        resp: Sender<Result<Vec<u8>>>,
+        resp: Sender<Result<TileRenderResult>>,
     },
     TextLayout {
         id: String,
@@ -74,7 +74,7 @@ impl PdfWorkerHandle {
         scale_x100: u32,
         tx_idx: u32,
         ty_idx: u32,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<TileRenderResult> {
         let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
 
         self.send_cmd(PdfCmd::RenderTile {
@@ -263,8 +263,8 @@ impl PdfWorker {
         scale_x100: u32,
         tx_idx: u32,
         ty_idx: u32,
-    ) -> Result<Vec<u8>> {
-        let start_time = Instant::now();
+    ) -> Result<TileRenderResult> {
+        let _total_start = Instant::now();
 
         let entry = self
             .docs
@@ -294,6 +294,11 @@ impl PdfWorker {
         let th = std::cmp::min(tile, h_px - y_px).max(1);
 
         unsafe {
+            let t0 = Instant::now();
+            
+            // 0) 设置阶段 - 获取页面、创建位图等
+            let setup_start = Instant::now();
+            
             // 获取或加载页面
             let bindings = self.pdfium.bindings();
             let page_handle = entry
@@ -308,6 +313,11 @@ impl PdfWorker {
 
             // 填充背景
             bindings.FPDFBitmap_FillRect(bmp, 0, 0, tw, th, 0x00000000);
+            
+            let setup_ms = setup_start.elapsed().as_secs_f64() * 1000.0;
+            
+            // 1) 光栅化/渲染阶段
+            let t1 = Instant::now();
 
             // 计算渲染矩阵
             let bleed_pt = 1.0 / s;
@@ -333,6 +343,11 @@ impl PdfWorker {
             // 渲染页面到位图
             let flags = 0x01 | 0x02; // FPDF_LCD_TEXT | FPDF_ANNOT
             bindings.FPDF_RenderPageBitmapWithMatrix(bmp, page_handle, &mut matrix, &clip, flags);
+            
+            let raster_ms = (Instant::now() - t1).as_secs_f64() * 1000.0;
+            
+            // 2) 颜色转换/打包阶段
+            let t2 = Instant::now();
 
             // 获取像素数据并转换为RGBA
             let buf = bindings.FPDFBitmap_GetBuffer(bmp) as *const u8;
@@ -351,24 +366,78 @@ impl PdfWorker {
 
             // 销毁位图
             bindings.FPDFBitmap_Destroy(bmp);
+            
+            let pack_ms = (Instant::now() - t2).as_secs_f64() * 1000.0;
+            
+            // 3) WebP编码阶段
+            let t3 = Instant::now();
 
-            // 编码为WebP
-            let webp = webp::Encoder::from_rgba(&rgba, tw as u32, th as u32)
-                .encode(WEBP_QUALITY as f32)
-                .to_vec();
+            // 编码为WebP - 使用高级优化参数
+            use webp::{Encoder, WebPConfig};
+            
+            let encoder = Encoder::from_rgba(&rgba, tw as u32, th as u32);
+            
+            // 创建高级配置 - 优化速度
+            let mut config = WebPConfig::new().unwrap();
+            config.quality = WEBP_QUALITY as f32;
+            config.method = WEBP_METHOD as i32;
+            config.thread_level = WEBP_THREAD_LEVEL as i32;
+            config.segments = WEBP_SEGMENTS as i32;
+            
+            // 额外的速度优化设置
+            config.target_size = 0;  // 不限制目标大小，优先速度
+            config.target_PSNR = 0.0; // 不限制PSNR，优先速度
+            config.pass = 1;         // 单次编码，最快
+            config.preprocessing = 0; // 跳过预处理，提升速度
+            config.partition_limit = 0; // 不限制分区，提升速度
+            
+            // 调试配置信息（仅在第一次打印）
+            static FIRST_CONFIG_LOG: std::sync::Once = std::sync::Once::new();
+            FIRST_CONFIG_LOG.call_once(|| {
+                println!("🔧 WebP配置: 质量={} | 方法={} | 线程={} | 分段={}", 
+                    config.quality, config.method, config.thread_level, config.segments);
+            });
+            
+            let webp = encoder.encode_advanced(&config).unwrap().to_vec();
+                
+            let encode_ms = (Instant::now() - t3).as_secs_f64() * 1000.0;
+            let total_ms = (Instant::now() - t0).as_secs_f64() * 1000.0;
 
+            // 详细的性能分析日志
+            let pixel_count = tw * th;
+            let megapixels = pixel_count as f64 / 1_000_000.0;
+            
             println!(
-                "🎨 瓦片渲染完成 - 页面:{} 瓦片:{}x{} 缩放:{} 尺寸:{}x{} 耗时:{:?}",
-                page,
-                tx_idx,
-                ty_idx,
-                scale_x100,
-                tw,
-                th,
-                start_time.elapsed()
+                "🚀 瓦片渲染完成 - 页面:{} 瓦片:{}x{} 缩放:{} 像素:{}x{}({:.2}MP)",
+                page, tx_idx, ty_idx, scale_x100, tw, th, megapixels
+            );
+            println!(
+                "⏱️  阶段耗时: 设置={:.2}ms | 光栅={:.2}ms | 打包={:.2}ms | 编码={:.2}ms | 总计={:.2}ms",
+                setup_ms, raster_ms, pack_ms, encode_ms, total_ms
+            );
+            
+            // 计算编码相关的性能指标
+            let encode_mpixels_per_sec = (pixel_count as f64 / 1_000_000.0) / (encode_ms / 1000.0);
+            let compression_ratio = (pixel_count * 4) as f64 / webp.len() as f64;
+            
+            println!(
+                "📊 性能指标: 总速度={:.0}像素/ms | 编码速度={:.1}MP/s | 压缩比={:.1}:1 | 文件大小={:.1}KB",
+                pixel_count as f64 / total_ms,
+                encode_mpixels_per_sec,
+                compression_ratio,
+                webp.len() as f64 / 1024.0
             );
 
-            Ok(webp)
+            Ok(TileRenderResult {
+                data: webp,
+                setup_ms,
+                raster_ms,
+                pack_ms,
+                encode_ms,
+                total_ms,
+                pixel_width: tw,
+                pixel_height: th,
+            })
         }
     }
 

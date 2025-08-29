@@ -4,9 +4,25 @@ use std::collections::HashMap;
 // 优化瓦片尺寸和质量参数
 pub const TILE_SIZE: u32 = 512;
 pub const BASE_DPI: f32 = 96.0;
-pub const WEBP_QUALITY: u8 = 75;
+pub const WEBP_QUALITY: u8 = 65;          // 质量 65，大幅提升编码速度
+pub const WEBP_METHOD: u8 = 0;            // 压缩方法 0，最快编码
+pub const WEBP_THREAD_LEVEL: u8 = 1;      // 线程级别 1，多线程优化
+pub const WEBP_SEGMENTS: u8 = 4;          // 分段数 4，提升压缩效率
 pub const MAX_DPI: f32 = 1000.0;
 pub const MIN_DPI: f32 = 36.0;
+
+// 瓦片渲染结果，包含数据和性能统计
+#[derive(Debug, Clone)]
+pub struct TileRenderResult {
+    pub data: Vec<u8>,
+    pub setup_ms: f64,
+    pub raster_ms: f64,
+    pub pack_ms: f64,
+    pub encode_ms: f64,
+    pub total_ms: f64,
+    pub pixel_width: i32,
+    pub pixel_height: i32,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PdfMetadata {

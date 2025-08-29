@@ -21,6 +21,8 @@ import {
 import { PdfTextLayer } from './PdfTextLayer';
 import { PageCanvas } from './PageCanvas';
 import { ScrollMetrics } from './hooks/useScrollHandler';
+import { LoadTask, PriorityTaskQueue } from '../../utils/taskQueue';
+import { performanceMonitor } from '../../utils/performanceMonitor';
 
 interface PdfContentProps {
   pdfMetadata: PdfMetadata;
@@ -35,26 +37,8 @@ interface PdfContentProps {
   getScrollMetrics: () => ScrollMetrics;
 }
 
-// 瓦片加载并发控制（本地应用可以使用更高并发）
-const MAX_CONCURRENCY = 16;
-const loadQueue: Array<() => Promise<void>> = [];
-let runningTasks = 0;
-
-function scheduleLoad(task: () => Promise<void>) {
-  loadQueue.push(task);
-  pumpQueue();
-}
-
-function pumpQueue() {
-  while (runningTasks < MAX_CONCURRENCY && loadQueue.length > 0) {
-    const task = loadQueue.shift()!;
-    runningTasks++;
-    task().finally(() => {
-      runningTasks--;
-      pumpQueue();
-    });
-  }
-}
+// 全局优先级任务队列
+const globalTaskQueue = new PriorityTaskQueue(32);
 
 export const PdfContent: React.FC<PdfContentProps> = ({
   pdfMetadata,
@@ -73,6 +57,10 @@ export const PdfContent: React.FC<PdfContentProps> = ({
   const inflightRef = useRef<Set<string>>(new Set());
   const [selectedText, setSelectedText] = useState<string>('');
   const lastScaleRef = useRef<number>(viewState.scale);
+  
+  // 焦点页面状态
+  const [focusPageIndex, setFocusPageIndex] = useState<number | null>(null);
+  const lastFocusPageRef = useRef<number | null>(null);
   
   const { crossPageSelection, setCrossPageSelection } = pdfState;
 
@@ -113,6 +101,76 @@ export const PdfContent: React.FC<PdfContentProps> = ({
       2 // PRELOAD_PAGES_AHEAD
     );
   }, [pageLayouts, viewState.scrollY, lastScrollY, containerRef]);
+
+  // 检测焦点页面（视口中心的页面）
+  const detectFocusPage = useCallback(() => {
+    if (!containerRef.current || pageLayouts.length === 0) return null;
+    
+    const containerHeight = containerRef.current.clientHeight;
+    const viewportCenter = viewState.scrollY + containerHeight / 2;
+    
+    // 找到视口中心所在的页面
+    for (const pageLayout of pageLayouts) {
+      const pageTop = pageLayout.y;
+      const pageBottom = pageLayout.y + pageLayout.height;
+      
+      if (viewportCenter >= pageTop && viewportCenter <= pageBottom) {
+        return pageLayout.pageIndex;
+      }
+    }
+    
+    // 如果没有找到，返回最接近的页面
+    const distances = pageLayouts.map(layout => {
+      const pageCenter = layout.y + layout.height / 2;
+      return {
+        pageIndex: layout.pageIndex,
+        distance: Math.abs(viewportCenter - pageCenter)
+      };
+    });
+    
+    distances.sort((a, b) => a.distance - b.distance);
+    return distances[0]?.pageIndex || null;
+  }, [containerRef, pageLayouts, viewState.scrollY]);
+
+  // 快速滚动检测和焦点页面管理
+  useEffect(() => {
+    const scrollMetrics = getScrollMetrics();
+    const isRapidScrolling = Math.abs(scrollMetrics.velocity.vy) > 2; // 速度阈值 2px/ms
+    
+    if (isScrolling) {
+      const currentFocusPage = detectFocusPage();
+      
+      if (isRapidScrolling) {
+        // 快速滚动时，更新焦点页面
+        if (currentFocusPage !== lastFocusPageRef.current) {
+          console.log(`快速滚动检测到焦点页面变化: ${lastFocusPageRef.current} -> ${currentFocusPage}`);
+          
+          setFocusPageIndex(currentFocusPage);
+          lastFocusPageRef.current = currentFocusPage;
+          
+          // 设置全局任务队列的焦点页面
+          globalTaskQueue.setFocusPage(currentFocusPage);
+          
+          // 取消非焦点页面的加载任务
+          globalTaskQueue.cancelNonFocusTasks();
+        }
+      } else {
+        // 慢速滚动时，也更新焦点页面但不取消其他任务
+        if (currentFocusPage !== lastFocusPageRef.current) {
+          setFocusPageIndex(currentFocusPage);
+          lastFocusPageRef.current = currentFocusPage;
+          globalTaskQueue.setFocusPage(currentFocusPage);
+        }
+      }
+    } else {
+      // 停止滚动时，清除焦点页面限制，恢复正常加载
+      if (focusPageIndex !== null) {
+        console.log('滚动停止，清除焦点页面限制');
+        setFocusPageIndex(null);
+        globalTaskQueue.setFocusPage(null);
+      }
+    }
+  }, [isScrolling, getScrollMetrics, detectFocusPage, focusPageIndex]);
 
   // 预加载扩展可见页面的瓦片
   useEffect(() => {
@@ -163,18 +221,83 @@ export const PdfContent: React.FC<PdfContentProps> = ({
                 const tileUrl = getTileUrl(tileInfo, devicePixelRatio, bucket.isTarget);
                 
                 pdfState.updateTileState(tileKey, { loading: true });
-                scheduleLoad(async () => {
-                  try {
-                    const response = await fetch(tileUrl, { cache: 'force-cache' });
-                    const blob = await response.blob();
-                    const bitmap = await createImageBitmap(blob);
-                    bitmapCacheRef.current.set(tileKey, bitmap);
-                    pdfState.updateTileState(tileKey, { loaded: true, loading: false });
-                  } catch (error) {
-                    console.warn(`Failed to preload ${bucket.key} tile:`, tileInfo);
+                
+                // 使用优先级任务队列
+                const task: LoadTask = {
+                  id: tileKey,
+                  priority: bucket.isTarget ? 100 : 200, // 目标桶优先级更高
+                  pageIndex,
+                  execute: async () => {
+                    try {
+                      const fetchStart = performance.now();
+                      const response = await fetch(tileUrl, { cache: 'force-cache' });
+                      const fetchEnd = performance.now();
+                      
+                      const blobStart = performance.now();
+                      const blob = await response.blob();
+                      const blobEnd = performance.now();
+                      
+                      const bitmapStart = performance.now();
+                      const bitmap = await createImageBitmap(blob);
+                      const bitmapEnd = performance.now();
+                      
+                      // 解析Server-Timing头
+                      const serverTiming = response.headers.get('Server-Timing');
+                      
+                      // 记录预加载性能统计
+                      const networkTime = fetchEnd - fetchStart;
+                      const blobTime = blobEnd - blobStart;
+                      const bitmapTime = bitmapEnd - bitmapStart;
+                      const totalFrontendTime = bitmapEnd - fetchStart;
+                      
+                      // 解析并显示详细的服务端时间
+                      const pixelHeader = response.headers.get('X-Pixels');
+                      const serverTimingParsed = performanceMonitor.parseServerTiming(serverTiming);
+                      const pixelInfo = performanceMonitor.parsePixelInfo(pixelHeader);
+                      
+                      let detailedServerStats = '';
+                      if (serverTimingParsed) {
+                        detailedServerStats = `
+                        🔧 服务端详情: 队列=${serverTimingParsed.queue.toFixed(1)}ms | 设置=${serverTimingParsed.setup.toFixed(1)}ms | 光栅=${serverTimingParsed.raster.toFixed(1)}ms | 打包=${serverTimingParsed.pack.toFixed(1)}ms | 编码=${serverTimingParsed.encode.toFixed(1)}ms | 总计=${serverTimingParsed.total.toFixed(1)}ms`;
+                        if (pixelInfo) {
+                          const megapixels = (pixelInfo.width * pixelInfo.height) / 1_000_000;
+                          detailedServerStats += ` | 像素=${pixelInfo.width}x${pixelInfo.height}(${megapixels.toFixed(2)}MP)`;
+                        }
+                      }
+                      
+                      console.log(`📦 预加载性能 [${tileKey}]: 
+                        网络: ${networkTime.toFixed(1)}ms 
+                        | Blob: ${blobTime.toFixed(1)}ms 
+                        | Bitmap: ${bitmapTime.toFixed(1)}ms 
+                        | 前端总计: ${totalFrontendTime.toFixed(1)}ms${detailedServerStats}`);
+                      
+                      // 记录到性能监控器
+                      performanceMonitor.recordTileLoad({
+                        tileKey,
+                        networkTime,
+                        blobTime,
+                        bitmapTime,
+                        totalFrontendTime,
+                        serverTiming: serverTimingParsed,
+                        pixelInfo: pixelInfo,
+                        timestamp: Date.now(),
+                        isPreload: true
+                      });
+                      
+                      bitmapCacheRef.current.set(tileKey, bitmap);
+                      pdfState.updateTileState(tileKey, { loaded: true, loading: false });
+                    } catch (error) {
+                      console.warn(`Failed to preload ${bucket.key} tile:`, tileInfo);
+                      pdfState.updateTileState(tileKey, { loading: false });
+                    }
+                  },
+                  cancel: () => {
                     pdfState.updateTileState(tileKey, { loading: false });
+                    inflightRef.current.delete(tileKey);
                   }
-                });
+                };
+                
+                globalTaskQueue.addTask(task);
               }
             }
           }
@@ -414,6 +537,8 @@ export const PdfContent: React.FC<PdfContentProps> = ({
           inflightRef={inflightRef}
           pdfState={pdfState}
           getScrollMetrics={getScrollMetrics}
+          isFocusPage={focusPageIndex === pageLayout.pageIndex}
+          globalTaskQueue={globalTaskQueue}
         />
       ))}
       
@@ -492,6 +617,74 @@ export const PdfContent: React.FC<PdfContentProps> = ({
             ? `已选择跨页文本 (页面 ${crossPageSelection.startPage + 1} - ${crossPageSelection.endPage + 1})`
             : ''
           }
+        </div>
+      )}
+      
+      {/* 调试面板 - 显示任务队列状态 */}
+      {1 && (
+        <div
+          style={{
+            position: 'fixed',
+            top: '20px',
+            left: '20px',
+            background: 'rgba(0, 0, 0, 0.8)',
+            color: 'white',
+            padding: '12px',
+            borderRadius: '6px',
+            fontSize: '11px',
+            fontFamily: 'monospace',
+            zIndex: 2000,
+            minWidth: '280px',
+          }}
+        >
+          <div style={{ fontWeight: 'bold', marginBottom: '8px' }}>渲染队列状态</div>
+          {(() => {
+            const queueStatus = globalTaskQueue.getQueueStatus();
+            const scrollMetrics = getScrollMetrics();
+            const perfAnalysis = performanceMonitor.getBottleneckAnalysis();
+            
+            return (
+              <>
+                <div>焦点页面: {focusPageIndex !== null ? `页面 ${focusPageIndex + 1}` : '无'}</div>
+                <div>队列待处理: {queueStatus.pending}</div>
+                <div>正在执行: {queueStatus.running}</div>
+                <div>滚动状态: {isScrolling ? '滚动中' : '静止'}</div>
+                <div>滚动速度: {Math.abs(scrollMetrics.velocity.vy).toFixed(1)} px/ms</div>
+                <div>可见页面: {visiblePages.map(p => p.pageIndex + 1).join(', ')}</div>
+                <div>缓存瓦片: {bitmapCacheRef.current.size}</div>
+                <div>加载中瓦片: {inflightRef.current.size}</div>
+                
+                {/* 性能统计 */}
+                <div style={{ marginTop: '8px', borderTop: '1px solid #444', paddingTop: '8px' }}>
+                  <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>性能分析 (最近{perfAnalysis.stats.count}次)</div>
+                  {perfAnalysis.stats.count > 0 ? (
+                    <>
+                      <div>平均网络: {perfAnalysis.stats.avgNetworkTime.toFixed(1)}ms</div>
+                      <div>平均Bitmap: {perfAnalysis.stats.avgBitmapTime.toFixed(1)}ms</div>
+                      <div>平均服务端: {perfAnalysis.stats.avgServerRender.toFixed(1)}ms</div>
+                      <div>前端总计: {perfAnalysis.stats.avgTotalFrontend.toFixed(1)}ms</div>
+                      
+                      {perfAnalysis.bottlenecks.length > 0 && (
+                        <div style={{ marginTop: '4px', color: '#ff9999' }}>
+                          瓶颈: {perfAnalysis.bottlenecks[0]}
+                        </div>
+                      )}
+                      
+                      <div style={{ marginTop: '4px', color: '#99ff99', fontSize: '10px' }}>
+                        {perfAnalysis.recommendation}
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{ color: '#ccc' }}>等待数据...</div>
+                  )}
+                </div>
+                
+                <div style={{ marginTop: '8px', fontSize: '10px', color: '#ccc' }}>
+                  详细日志请查看控制台 🎯📦
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
     </div>

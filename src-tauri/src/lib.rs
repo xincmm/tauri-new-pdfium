@@ -4,12 +4,32 @@ mod pdf;
 use anyhow::{anyhow, Result};
 use pdf::*;
 use tauri::{AppHandle, Manager};
+use std::time::Instant;
 
 // 全局静态变量存储 Pdfium 库路径，供 spawn_blocking 中使用
 static PDFIUM_LIBRARY_PATH: once_cell::sync::OnceCell<String> = once_cell::sync::OnceCell::new();
 
-// 异步处理瓦片请求
-async fn handle_tile_request(uri: &str, app: &AppHandle) -> Result<Vec<u8>> {
+// 性能统计结构
+#[derive(Debug)]
+struct TilePerformanceStats {
+    total_time: std::time::Duration,
+    cache_check_time: std::time::Duration,
+    render_time: std::time::Duration,
+    cache_store_time: std::time::Duration,
+    // 渲染阶段详细统计
+    setup_ms: f64,
+    raster_ms: f64,
+    pack_ms: f64,
+    encode_ms: f64,
+    pixel_width: i32,
+    pixel_height: i32,
+}
+
+// 异步处理瓦片请求，返回数据和性能统计
+async fn handle_tile_request(uri: &str, app: &AppHandle) -> Result<(Vec<u8>, TilePerformanceStats, f64)> {
+    let total_start = Instant::now();
+    let queue_start = Instant::now();
+    
     let parts: Vec<&str> = uri.trim_matches('/').split('/').collect();
 
     let (id, page, scale, tx, ty) = match parts.as_slice() {
@@ -42,23 +62,58 @@ async fn handle_tile_request(uri: &str, app: &AppHandle) -> Result<Vec<u8>> {
     };
 
     // 检查瓦片缓存
+    let cache_check_start = Instant::now();
     if let Some(buf) = TileCache::get(&key) {
-        return Ok((*buf).clone());
+        let cache_check_time = cache_check_start.elapsed();
+        let total_time = total_start.elapsed();
+        let stats = TilePerformanceStats {
+            total_time,
+            cache_check_time,
+            render_time: std::time::Duration::ZERO, // 缓存命中，无渲染时间
+            cache_store_time: std::time::Duration::ZERO,
+            setup_ms: 0.0,
+            raster_ms: 0.0,
+            pack_ms: 0.0,
+            encode_ms: 0.0,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        return Ok(((*buf).clone(), stats, 0.0)); // 缓存命中，无队列等待
     }
+    let cache_check_time = cache_check_start.elapsed();
 
     // 获取PDF工作线程句柄
     let worker = app.state::<PdfWorkerHandle>();
 
     // 通过工作线程渲染瓦片
-    let bytes = worker
+    let queue_ms = queue_start.elapsed().as_secs_f64() * 1000.0;
+    let render_start = Instant::now();
+    let render_result = worker
         .inner()
         .render_tile(id, page, scale_x100, tx, ty)
         .map_err(|e| anyhow!("瓦片渲染失败: {}", e))?;
+    let render_time = render_start.elapsed();
 
     // 缓存结果
-    TileCache::put(key, std::sync::Arc::new(bytes.clone()));
+    let cache_store_start = Instant::now();
+    TileCache::put(key, std::sync::Arc::new(render_result.data.clone()));
+    let cache_store_time = cache_store_start.elapsed();
 
-    Ok(bytes)
+    let total_time = total_start.elapsed();
+    let stats = TilePerformanceStats {
+        total_time,
+        cache_check_time,
+        render_time,
+        cache_store_time,
+        setup_ms: render_result.setup_ms,
+        raster_ms: render_result.raster_ms,
+        pack_ms: render_result.pack_ms,
+        encode_ms: render_result.encode_ms,
+        pixel_width: render_result.pixel_width,
+        pixel_height: render_result.pixel_height,
+    };
+
+    Ok((render_result.data, stats, queue_ms))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -135,15 +190,50 @@ pub fn run() {
             // 异步处理瓦片请求
             tauri::async_runtime::spawn(async move {
                 let response = match handle_tile_request(&path, &app).await {
-                    Ok(bytes) => Response::builder()
-                        .status(StatusCode::OK)
-                        .header(header::CONTENT_TYPE, "image/webp")
-                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, &origin)
-                        .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST, OPTIONS")
-                        .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "*")
-                        .header(header::CACHE_CONTROL, "public, max-age=31536000")
-                        .body(bytes)
-                        .unwrap(),
+                    Ok((bytes, stats, queue_ms)) => {
+                        let write_start = Instant::now();
+                        
+                        // 构建详细的Server-Timing头，包含队列等待时间
+                        let server_timing = format!(
+                            "queue;dur={:.2}, setup;dur={:.2}, raster;dur={:.2}, pack;dur={:.2}, encode;dur={:.2}, total;dur={:.2}",
+                            queue_ms,
+                            stats.setup_ms,
+                            stats.raster_ms,
+                            stats.pack_ms,
+                            stats.encode_ms,
+                            stats.total_time.as_secs_f64() * 1000.0
+                        );
+                        
+                        // 像素信息头
+                        let pixel_info = format!("{}x{}", stats.pixel_width, stats.pixel_height);
+                        let content_length = bytes.len().to_string();
+                        
+                        // 构建响应 - 确保一次性完整传输
+                        let response = Response::builder()
+                            .status(StatusCode::OK)
+                            .header(header::CONTENT_TYPE, "image/webp")
+                            .header(header::CONTENT_LENGTH, &content_length)  // 关键：明确长度
+                            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, &origin)
+                            .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST, OPTIONS")
+                            .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "*")
+                            .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")  // 添加immutable
+                            .header("Timing-Allow-Origin", "*")  // 允许前端读取timing
+                            .header("Server-Timing", server_timing)
+                            .header("X-Pixels", pixel_info)
+                            .body(bytes)  // 完整字节一次性传输
+                            .unwrap();
+                            
+                        let write_ms = write_start.elapsed().as_secs_f64() * 1000.0;
+                        
+                        // 记录传输性能
+                        println!("📤 传输完成: {}KB | 传输时间={:.2}ms | 服务端总计={:.2}ms", 
+                            content_length.parse::<usize>().unwrap() / 1024,
+                            write_ms,
+                            stats.total_time.as_secs_f64() * 1000.0
+                        );
+                        
+                        response
+                    },
                     Err(e) => Response::builder()
                         .status(StatusCode::NOT_FOUND)
                         .header(header::CONTENT_TYPE, "text/plain")
