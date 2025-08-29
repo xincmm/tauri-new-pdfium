@@ -32,7 +32,7 @@ new PerformanceObserver(list => {
 
 // 处理主线程发来的消息
 self.onmessage = async ({ data }) => {
-  const { type, id, url, options = {} } = data;
+  const { type, id, url, options = {}, epoch } = data;
 
   try {
     switch (type) {
@@ -43,7 +43,7 @@ self.onmessage = async ({ data }) => {
 
       case 'load-tile':
         // 完整的瓦片加载：网络 + 解码
-        await handleTileLoad(id, url, options);
+        await handleTileLoad(id, url, options, epoch);
         break;
 
       case 'cancel-task':
@@ -94,7 +94,7 @@ async function handleFetchTest(id, url) {
 }
 
 // 处理完整的瓦片加载
-async function handleTileLoad(id, url, options) {
+async function handleTileLoad(id, url, options, epoch) {
   const abortController = new AbortController();
   inflightRequests.set(id, abortController);
 
@@ -140,6 +140,7 @@ async function handleTileLoad(id, url, options) {
     self.postMessage({
       type: 'tile-loaded',
       id,
+      epoch, // 包含epoch信息
       imageBitmap,
       performance: {
         fetchTime,

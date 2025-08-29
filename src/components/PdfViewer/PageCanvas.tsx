@@ -20,11 +20,11 @@ import {
   generateBucketTileKey
 } from '../../utils/bucketUtils';
 import {
-  scrollBlit
-  // isTileInOverscanArea // 暂时不使用
+  scrollBlit,
+  isTileInOverscanArea
 } from '../../utils/scrollOptimization';
 import { ScrollMetrics } from './hooks/useScrollHandler';
-import { LoadTask, PriorityTaskQueue } from '../../utils/taskQueue';
+import { TaskSpec, PriorityTaskQueue } from '../../utils/taskQueue';
 import { performanceMonitor } from '../../utils/performanceMonitor';
 import { WorkerTileLoader, TileLoadResult } from '../../utils/workerTileLoader';
 
@@ -44,7 +44,7 @@ let globalWorkerLoader: WorkerTileLoader | null = null;
 function getWorkerLoader(): WorkerTileLoader {
   if (!globalWorkerLoader) {
     globalWorkerLoader = new WorkerTileLoader({
-      maxConcurrency: 6, // 降低并发数
+      maxConcurrency: 6, // 降低并发数，配合任务队列的6，总共12个并发
       workerPath: '/workers/tile-loader-worker.js'
     });
     
@@ -54,20 +54,6 @@ function getWorkerLoader(): WorkerTileLoader {
     }, 1000);
   }
   return globalWorkerLoader;
-}
-
-// 同步 Worker 和主线程的 Epoch
-export function syncWorkerEpoch(epoch: number) {
-  if (globalWorkerLoader) {
-    // 这里需要手动设置 Worker 的 epoch，因为它们是独立的实例
-    // 我们可以通过调用 advanceEpoch 直到达到目标 epoch
-    const currentEpoch = globalWorkerLoader.getCurrentEpoch();
-    if (currentEpoch < epoch) {
-      for (let i = currentEpoch; i < epoch; i++) {
-        globalWorkerLoader.advanceEpoch();
-      }
-    }
-  }
 }
 
 // 清理函数
@@ -151,6 +137,12 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
       lastStillTime: Date.now(),
       needsFadeTransition: false,
     });
+    
+    // 触发reconcile - 缩放变化是主要的epoch推进时机
+    if (globalTaskQueue) {
+      const neededTasks = collectNeededTasks('scale-change');
+      globalTaskQueue.reconcile(neededTasks, 'scale-change');
+    }
   }, [viewState.scale]);
   
   const { 
@@ -162,6 +154,8 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   const pageX = containerWidth > pageWidth 
     ? Math.max(20, (containerWidth - pageWidth) / 2)
     : 20;
+
+  // collectNeededTasks将在其他依赖函数之后声明
 
   // 请求重绘（只影响当前页面）
   const requestRedraw = useCallback(() => {
@@ -192,14 +186,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     
     try {
       const workerLoader = getWorkerLoader();
-      // 确保Worker和主线程Epoch同步
-      const currentEpoch = globalTaskQueue?.getCurrentEpoch() || 0;
-      if (workerLoader.getCurrentEpoch() !== currentEpoch) {
-        console.log(`同步Worker Epoch: ${workerLoader.getCurrentEpoch()} -> ${currentEpoch}`);
-        syncWorkerEpoch(currentEpoch);
-      }
-      
-      const result: TileLoadResult = await workerLoader.loadTile(key, url, priority, currentEpoch);
+      const result: TileLoadResult = await workerLoader.loadTile(key, url, priority);
       
       const { imageBitmap, performance: perfData } = result;
       
@@ -368,6 +355,118 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     const allBuckets = generateRenderBuckets(viewState.scale);
     return allBuckets.filter(bucket => checkBucketTilesReady(bucket));
   }, [viewState.scale, checkBucketTilesReady]);
+
+  // 收集当前页面需要的所有瓦片任务
+  const collectNeededTasks = useCallback((reason: string) => {
+    const neededTasks: TaskSpec[] = [];
+    const tileGeometry = computeTileGeometry();
+    const allBuckets = generateRenderBuckets(viewState.scale);
+    const currentScale = viewState.scale;
+    
+    // 获取滚动和overscan信息
+    const scrollMetrics = getScrollMetrics?.();
+    const overscanConfig = scrollMetrics?.overscan || { extraCols: 1, extraRows: 1 };
+    
+    for (const bucket of allBuckets) {
+      // 决定是否应该加载这个桶的瓦片
+      const shouldLoadBucket = shouldLoadTargetBucket(null, bucket, currentScale) ||
+        bucket.isTarget; // 总是确保目标桶的瓦片
+      
+      if (!shouldLoadBucket) continue;
+      
+      for (const tile of tileGeometry) {
+        const { tx, ty, tileX, tileY, renderWidth, renderHeight } = tile;
+        
+        // 检查瓦片是否在overscan区域内
+        const isInOverscan = isTileInOverscanArea(
+          tileX, tileY, renderWidth, renderHeight,
+          0, 0, pageWidth, pageHeight,
+          overscanConfig
+        );
+        
+        // 如果正在快速滚动且瓦片在overscan区域外，跳过加载（除非是焦点页面）
+        if (isScrolling && !isInOverscan && scrollMetrics && 
+            (Math.abs(scrollMetrics.velocity.vy) > 1) && !isFocusPage) {
+          continue;
+        }
+        
+        const tileKey = generateBucketTileKey(bucket, {
+          id: pdfMetadata.id,
+          page: pageIndex,
+          tx,
+          ty,
+        });
+        
+        const tileState = getTileState(tileKey);
+        const bitmap = bitmapCacheRef.current.get(tileKey);
+        
+        // 如果瓦片尚未加载且不在加载中，加入需求列表
+        if (!bitmap && !tileState.loading) {
+          const tileInfo: TileInfo = {
+            id: pdfMetadata.id,
+            page: pageIndex,
+            scale: Math.round(bucket.scale * 100) / 100,
+            tx,
+            ty,
+          };
+          
+          const tileUrl = getTileUrl(tileInfo, devicePixelRatio, bucket.isTarget);
+          
+          const basePriority = bucket.isTarget ? 100 : 200;
+          const distancePriority = Math.floor(Math.abs((tileY + renderHeight/2) - pageHeight/2) / 10);
+          const finalPriority = basePriority + distancePriority + (isFocusPage ? -1000 : 0);
+          
+          neededTasks.push({
+            id: tileKey,
+            priority: finalPriority,
+            pageIndex,
+            execute: async () => {
+              try {
+                updateTileState(tileKey, { loading: true });
+                await loadBitmapWithWorker(tileUrl, tileKey, finalPriority);
+                updateTileState(tileKey, { loaded: true, loading: false });
+                
+                // 检查是否该桶的整页瓦片都已完成
+                setTimeout(() => {
+                  if (checkBucketTilesReady(bucket)) {
+                    requestRedraw();
+                  }
+                }, 0);
+              } catch (error) {
+                console.warn(`Failed to load ${bucket.key} tile:`, tileInfo);
+                updateTileState(tileKey, { loading: false });
+              }
+            },
+            cancel: () => {
+              updateTileState(tileKey, { loading: false });
+              inflightRef.current.delete(tileKey);
+            }
+          });
+        }
+      }
+    }
+    
+    console.log(`📋 页面${pageIndex + 1}收集任务 (${reason}): ${neededTasks.length}个瓦片任务`);
+    return neededTasks;
+  }, [
+    computeTileGeometry,
+    viewState.scale,
+    isScrolling,
+    isFocusPage,
+    pageWidth,
+    pageHeight,
+    pageIndex,
+    pdfMetadata.id,
+    devicePixelRatio,
+    getTileState,
+    updateTileState,
+    loadBitmapWithWorker,
+    checkBucketTilesReady,
+    requestRedraw,
+    getScrollMetrics,
+    bitmapCacheRef,
+    inflightRef
+  ]);
 
   // 重建静态背景
   const rebuildStaticBackground = useCallback(() => {
@@ -562,12 +661,8 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
       activeBucket = targetBucket;
     } else if (bestAvailableBucket) {
       activeBucket = bestAvailableBucket;
-    } else if (pageRenderState.activeBucket) {
-      activeBucket = pageRenderState.activeBucket; // 保持当前桶
     } else {
-      // 初始状态：选择目标桶开始加载
-      activeBucket = targetBucket;
-      console.log(`页面 ${pageIndex + 1} 初始状态，选择目标桶 ${targetBucket.key} 开始加载`);
+      activeBucket = pageRenderState.activeBucket; // 保持当前桶
     }
     
     // 更新页面渲染状态
@@ -611,10 +706,6 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     if (isFocusPage) {
       console.log(`焦点页面 ${pageIndex + 1} 桶策略: 活动桶=${activeBucket.key}(${activeBucket.scale.toFixed(2)}), 可用桶=${availableBuckets.length}, 静止=${isCurrentlyStill}`);
     }
-    
-    // 添加瓦片渲染调试信息
-    let renderedTiles = 0;
-    let totalTiles = tileGeometry.length;
 
     // 整页替换时清除缓存，重新绘制静态背景
     cacheCtx.drawImage(getStaticBackgroundCanvas(), 0, 0);
@@ -641,192 +732,28 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
         cacheCtx.imageSmoothingEnabled = needsSmoothing;
         paintTile(cacheCtx, activeBitmap, tileX, tileY, renderWidth, renderHeight);
         cacheCtx.imageSmoothingEnabled = false;
-        renderedTiles++;
-      } else {
-        // 调试：记录未渲染的瓦片 - 暂时禁用避免循环
-        // if (pageIndex === 0 && !activeTileState.loading && !activeBitmap) {
-        //   console.log(`瓦片 (${tx},${ty}) 缺失: bitmap=${!!activeBitmap}, loaded=${activeTileState.loaded}, loading=${activeTileState.loading}`);
-        // }
       }
     }
     
-    // 第二道保险：基于overscan的优化加载策略 - 暂时禁用
-    const scrollMetrics = getScrollMetrics?.();
-    // const overscanConfig = scrollMetrics?.overscan || { extraCols: 1, extraRows: 1 };
+    // 第二道保险：基于overscan的优化加载策略 - 现在由collectNeededTasks处理
     
-    // 收集当前需要的瓦片ID，用于取消远处的请求
-    const currentNeededTiles = new Set<string>();
+    // 使用epoch机制的reconcile策略，替代原来的逐个添加任务
+    // 在特定条件下触发reconcile，避免过于频繁的调用
+    const shouldTriggerReconcile = (
+      needsFullRender() || // 首次渲染或状态变化
+      (!isScrolling && pageRenderState.lastStillTime !== newStillTime) // 滚动刚停止
+    );
     
-    // 后台加载策略：为所有桶加载瓦片（带overscan优化）
-    for (const bucket of allBuckets) {
-      // 决定是否应该加载这个桶的瓦片
-      const shouldLoadBucket = shouldLoadTargetBucket(activeBucket, bucket, currentScale) ||
-        bucket === activeBucket; // 总是确保活动桶的瓦片完整
-      
-      if (!shouldLoadBucket) continue;
-      
-      // 按优先级排序瓦片（近→远优先）
-      const sortedTiles = [...tileGeometry].sort((a, b) => {
-        const aCenter = a.tileY + (a.renderHeight / 2);
-        const bCenter = b.tileY + (b.renderHeight / 2);
-        const viewportCenter = pageHeight / 2; // 简化的视口中心
-        
-        const aDist = Math.abs(aCenter - viewportCenter);
-        const bDist = Math.abs(bCenter - viewportCenter);
-        
-        return aDist - bDist; // 距离近的优先
-      });
-      
-      for (const tile of sortedTiles) {
-        const { tx, ty } = tile;
-        
-        // 第二道保险：检查瓦片是否在overscan区域内 - 暂时禁用
-        // const isInOverscan = isTileInOverscanArea(
-        //   tileX, tileY, renderWidth, renderHeight,
-        //   0, 0, pageWidth, pageHeight, // 简化的视口区域
-        //   overscanConfig
-        // );
-        
-        // 如果正在快速滚动且瓦片在overscan区域外，跳过加载（除非是焦点页面）
-        // 暂时禁用这个检查，确保所有瓦片都能加载
-        // if (isScrolling && !isInOverscan && scrollMetrics && 
-        //     (Math.abs(scrollMetrics.velocity.vy) > 1) && !isFocusPage) { // 焦点页面优先加载
-        //   continue;
-        // }
-        
-        const tileKey = generateBucketTileKey(bucket, {
-          id: pdfMetadata.id,
-          page: pageIndex,
-          tx,
-          ty,
-        });
-        
-        // 添加到当前需要的瓦片集合 - 暂时添加所有瓦片
-        currentNeededTiles.add(tileKey);
-        
-        const tileState = getTileState(tileKey);
-        const bitmap = bitmapCacheRef.current.get(tileKey);
-        
-        // 如果瓦片尚未加载，启动加载（重置被取消的任务）
-        if (!bitmap) {
-          // 如果任务被取消但瓦片仍然缺失，重置状态
-          if (tileState.loading && !inflightRef.current.has(tileKey)) {
-            console.log(`🔄 重置被取消的瓦片任务: ${tileKey}`);
-            updateTileState(tileKey, { loading: false, loaded: false });
-          }
-          
-          // 避免重复加载
-          if (tileState.loading && inflightRef.current.has(tileKey)) {
-            continue; // 正在加载中，跳过
-          }
-          const tileInfo: TileInfo = {
-            id: pdfMetadata.id,
-            page: pageIndex,
-            scale: Math.round(bucket.scale * 100) / 100,
-            tx,
-            ty,
-          };
-          
-          const tileUrl = getTileUrl(tileInfo, devicePixelRatio, bucket.isTarget);
-          
-          updateTileState(tileKey, { loading: true });
-          
-          // 使用全局优先级队列（如果可用）或回退到简单队列
-          if (globalTaskQueue) {
-            const basePriority = bucket.isTarget ? 100 : 200;
-            const distancePriority = Math.floor(Math.abs(ty * TILE_SIZE - pageHeight/2) / 10); // 简化的距离权重
-            const finalPriority = basePriority + distancePriority + (isFocusPage ? -1000 : 0); // 焦点页面大幅提升优先级
-            
-            const task: LoadTask = {
-              id: tileKey,
-              priority: finalPriority,
-              pageIndex,
-              epoch: globalTaskQueue.getCurrentEpoch(), // 使用当前Epoch
-              bucketKey: bucket.key, // 添加桶键用于去重
-              execute: async () => {
-                try {
-                  await loadBitmapWithWorker(tileUrl, tileKey, finalPriority);
-                  updateTileState(tileKey, { loaded: true, loading: false });
-                  
-                  // 检查是否该桶的整页瓦片都已完成
-                  setTimeout(() => {
-                    if (checkBucketTilesReady(bucket)) {
-                      requestRedraw();
-                    }
-                  }, 0);
-                } catch (error) {
-                  console.warn(`Failed to load ${bucket.key} tile:`, tileInfo);
-                  updateTileState(tileKey, { loading: false });
-                }
-              },
-              cancel: () => {
-                updateTileState(tileKey, { loading: false });
-                inflightRef.current.delete(tileKey);
-              }
-            };
-            
-            globalTaskQueue.addTask(task);
-          } else {
-            // 回退到Worker加载器
-            const basePriority = bucket.isTarget ? 100 : 200;
-            const distancePriority = Math.floor(Math.abs(ty * TILE_SIZE - pageHeight/2) / 10); // 简化的距离权重
-            const finalPriority = basePriority + distancePriority + (isFocusPage ? -1000 : 0);
-            
-            loadBitmapWithWorker(tileUrl, tileKey, finalPriority)
-              .then(() => {
-                updateTileState(tileKey, { loaded: true, loading: false });
-                
-                // 检查是否该桶的整页瓦片都已完成
-                setTimeout(() => {
-                  if (checkBucketTilesReady(bucket)) {
-                    requestRedraw();
-                  }
-                }, 0);
-              })
-              .catch(() => {
-                console.warn(`Failed to load ${bucket.key} tile:`, tileInfo);
-                updateTileState(tileKey, { loading: false });
-              });
-          }
-        }
-      }
+    if (shouldTriggerReconcile && globalTaskQueue) {
+      const reason = needsFullRender() ? 'state-change' : 'scroll-stopped';
+      const neededTasks = collectNeededTasks(reason);
+      globalTaskQueue.reconcile(neededTasks, reason);
     }
 
-    // 取消远处的任务以减少并发压力
-    if (isScrolling && scrollMetrics && Math.abs(scrollMetrics.velocity.vy) > 0.5) {
-      const workerLoader = getWorkerLoader();
-      workerLoader.cancelDistantTasks(currentNeededTiles);
-    }
+    // Epoch机制已经在reconcile中处理了任务清理，无需手动取消远处任务
 
     // 将缓存内容复制到主canvas
     ctx.drawImage(cacheCanvas, 0, 0);
-    
-    // 调试信息：瓦片渲染统计 - 只在不完整时记录一次
-    if (pageIndex === 0 && renderedTiles < totalTiles) { 
-      console.log(`⚠️ 页面 ${pageIndex + 1} 瓦片渲染不完整: ${renderedTiles}/${totalTiles} (${(renderedTiles/totalTiles*100).toFixed(1)}%)`);
-      
-      // 记录缺失的瓦片
-      let missingTiles = [];
-      for (const tile of tileGeometry) {
-        const { tx, ty } = tile;
-        const tileKey = generateBucketTileKey(activeBucket, {
-          id: pdfMetadata.id,
-          page: pageIndex,
-          tx,
-          ty,
-        });
-        const bitmap = bitmapCacheRef.current.get(tileKey);
-        const tileState = getTileState(tileKey);
-        
-        if (!bitmap || !tileState.loaded) {
-          missingTiles.push(`(${tx},${ty}):loading=${tileState.loading}`);
-        }
-      }
-      
-      if (missingTiles.length > 0) {
-        console.log(`🔍 缺失瓦片详情:`, missingTiles.slice(0, 5)); // 只显示前5个
-      }
-    }
   }, [
     pageWidth,
     pageHeight,
@@ -838,7 +765,6 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     bitmapCacheRef,
     getTileState,
     updateTileState,
-    loadBitmapWithWorker,
     getCacheCanvas,
     getStaticBackgroundCanvas,
     needsFullRender,
@@ -849,7 +775,8 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     getAvailableBuckets,
     pageRenderState,
     isFocusPage,
-    globalTaskQueue
+    globalTaskQueue,
+    collectNeededTasks
   ]);
 
   // 当需要重绘时执行

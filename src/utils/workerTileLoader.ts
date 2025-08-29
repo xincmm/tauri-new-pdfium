@@ -16,17 +16,8 @@ export interface TileLoadResult {
 }
 
 export interface WorkerTileLoaderConfig {
-  maxConcurrency: number; // 最大并发数，建议4-6
+  maxConcurrency: number; // 最大并发数，建议6-8，默认6
   workerPath: string;
-}
-
-// 任务信息接口
-interface TaskInfo {
-  id: string;
-  url: string;
-  priority: number;
-  epoch: number; // 新增：任务时代
-  options?: RequestInit;
 }
 
 export class WorkerTileLoader {
@@ -34,74 +25,24 @@ export class WorkerTileLoader {
   private pendingTasks = new Map<string, {
     resolve: (result: TileLoadResult) => void;
     reject: (error: Error) => void;
-    epoch: number; // 任务时代
+    epoch?: number;
   }>();
   private activeTasks = new Set<string>();
-  private taskQueue: TaskInfo[] = [];
-  private currentEpoch = 0; // 当前时代
+  private taskQueue: Array<{
+    id: string;
+    url: string;
+    priority: number;
+    epoch: number;
+    options?: RequestInit;
+  }> = [];
   
   private config: WorkerTileLoaderConfig;
   private isDestroyed = false;
+  private currentEpoch = 0;
 
   constructor(config: WorkerTileLoaderConfig) {
     this.config = config;
     this.initWorker();
-  }
-
-  // 推进时代
-  advanceEpoch(): number {
-    this.currentEpoch++;
-    console.log(`🔄 WorkerTileLoader 推进到 Epoch ${this.currentEpoch}`);
-    
-    // 清理过时的任务
-    this.cleanupStaleEpochTasks();
-    return this.currentEpoch;
-  }
-
-  // 获取当前时代
-  getCurrentEpoch(): number {
-    return this.currentEpoch;
-  }
-
-  // 清理过时的任务
-  private cleanupStaleEpochTasks() {
-    let cleanedCount = 0;
-    
-    // 清理队列中的过时任务
-    const originalQueueLength = this.taskQueue.length;
-    this.taskQueue = this.taskQueue.filter(task => task.epoch >= this.currentEpoch);
-    cleanedCount += originalQueueLength - this.taskQueue.length;
-    
-    // 清理pending任务中的过时任务
-    const pendingToCancel: string[] = [];
-    this.pendingTasks.forEach((task, id) => {
-      if (task.epoch < this.currentEpoch) {
-        pendingToCancel.push(id);
-      }
-    });
-    
-    // 取消过时的pending任务
-    pendingToCancel.forEach(id => {
-      const task = this.pendingTasks.get(id);
-      if (task) {
-        task.reject(new Error(`Task cancelled due to epoch change (${task.epoch} < ${this.currentEpoch})`));
-        this.pendingTasks.delete(id);
-        cleanedCount++;
-      }
-      
-      // 如果任务正在执行，通知Worker取消
-      if (this.activeTasks.has(id)) {
-        this.worker?.postMessage({
-          type: 'cancel-task',
-          id
-        });
-        this.activeTasks.delete(id);
-      }
-    });
-    
-    if (cleanedCount > 0) {
-      console.log(`🗑️ WorkerTileLoader 清理了 ${cleanedCount} 个过时任务`);
-    }
   }
 
   private initWorker() {
@@ -117,12 +58,80 @@ export class WorkerTileLoader {
     }
   }
 
+  /**
+   * Reconcile方法：以集合对账的方式管理Worker任务
+   */
+  reconcile(neededTasks: Array<{
+    id: string;
+    url: string;
+    priority: number;
+    options?: RequestInit;
+  }>, reason: string = 'viewport-change') {
+    // 推进epoch
+    this.currentEpoch++;
+    
+    console.log(`🔄 Worker任务对账 Epoch ${this.currentEpoch} (${reason}): 需要${neededTasks.length}个任务`);
+    
+    // 第一关口：清理队列中不在本次需求中的任务
+    const neededIds = new Set(neededTasks.map(t => t.id));
+    const removedTasks: string[] = [];
+    
+    this.taskQueue = this.taskQueue.filter(task => {
+      if (!neededIds.has(task.id) || task.epoch !== this.currentEpoch) {
+        removedTasks.push(task.id);
+        return false;
+      }
+      return true;
+    });
+    
+    // 取消不需要的pending任务
+    for (const [id, task] of this.pendingTasks) {
+      if (!neededIds.has(id) || (task.epoch && task.epoch !== this.currentEpoch)) {
+        this.cancelTask(id);
+        removedTasks.push(id);
+      }
+    }
+    
+    if (removedTasks.length > 0) {
+      console.log(`🗑️ Worker清理任务: ${removedTasks.length}个`);
+    }
+    
+    // 添加新需要的任务
+    for (const taskSpec of neededTasks) {
+      // 检查是否已在队列中
+      const existingIndex = this.taskQueue.findIndex(t => t.id === taskSpec.id);
+      
+      const task = {
+        ...taskSpec,
+        epoch: this.currentEpoch
+      };
+      
+      if (existingIndex >= 0) {
+        // 更新现有任务
+        this.taskQueue[existingIndex] = task;
+      } else {
+        // 添加新任务
+        this.taskQueue.push(task);
+      }
+    }
+    
+    // 立即处理队列
+    this.processQueue();
+    
+    console.log(`✅ Worker对账完成: 队列${this.taskQueue.length}个, 活动${this.activeTasks.size}个/${this.config.maxConcurrency}`);
+  }
+
+  // 获取当前epoch
+  getCurrentEpoch(): number {
+    return this.currentEpoch;
+  }
+
   private handleWorkerMessage(event: MessageEvent) {
-    const { type, id, imageBitmap, performance, error } = event.data;
+    const { type, id, imageBitmap, performance, error, epoch } = event.data;
     
     switch (type) {
       case 'tile-loaded':
-        this.handleTileLoaded(id, imageBitmap, performance);
+        this.handleTileLoaded(id, imageBitmap, performance, epoch);
         break;
         
       case 'tile-error':
@@ -157,19 +166,26 @@ export class WorkerTileLoader {
     this.activeTasks.clear();
   }
 
-  private handleTileLoaded(id: string, imageBitmap: ImageBitmap, performance: any) {
+  private handleTileLoaded(id: string, imageBitmap: ImageBitmap, performance: any, epoch?: number) {
     const task = this.pendingTasks.get(id);
     if (task) {
-      // 检查任务是否已过时
-      if (task.epoch < this.currentEpoch) {
-        console.log(`⏰ 丢弃过时结果 (Epoch ${task.epoch} < ${this.currentEpoch}): ${id}`);
-        // 释放ImageBitmap资源
-        imageBitmap.close();
-        this.pendingTasks.delete(id);
+      // 第三关口：上屏前检查epoch有效性
+      if (task.epoch && epoch && task.epoch !== epoch) {
+        console.log(`🚫 Worker结果已过期，丢弃: ${id} (结果Epoch ${epoch} vs 任务Epoch ${task.epoch})`);
+        imageBitmap?.close?.(); // 释放ImageBitmap
+        task.reject(new Error('Result epoch mismatch'));
+      } else if (task.epoch && task.epoch !== this.currentEpoch) {
+        console.log(`🚫 Worker结果已过期，丢弃: ${id} (任务Epoch ${task.epoch} vs 当前Epoch ${this.currentEpoch})`);
+        imageBitmap?.close?.(); // 释放ImageBitmap
+        task.reject(new Error('Result epoch obsolete'));
       } else {
         task.resolve({ imageBitmap, performance });
-        this.pendingTasks.delete(id);
       }
+      this.pendingTasks.delete(id);
+    } else {
+      // 如果没有对应的pending任务，可能已经被取消，直接释放bitmap
+      console.log(`🚫 Worker结果无对应任务，丢弃: ${id}`);
+      imageBitmap?.close?.();
     }
     
     this.activeTasks.delete(id);
@@ -203,26 +219,28 @@ export class WorkerTileLoader {
   }
 
   private processQueue() {
-    // 处理队列中的任务，按优先级和时代排序
+    // 处理队列中的任务，按优先级排序
     if (this.activeTasks.size >= this.config.maxConcurrency || this.taskQueue.length === 0) {
       return;
     }
 
-    // 按时代和优先级排序（新时代优先，然后是优先级）
+    // 按优先级排序（数值越小优先级越高）
     this.taskQueue.sort((a, b) => {
+      // Epoch检查优先
       if (a.epoch !== b.epoch) {
-        return b.epoch - a.epoch; // 新时代优先
+        return b.epoch - a.epoch; // 新epoch优先
       }
-      return a.priority - b.priority; // 数值越小优先级越高
+      return a.priority - b.priority;
     });
     
     const task = this.taskQueue.shift();
     if (!task) return;
 
-    // 再次检查任务是否过时
-    if (task.epoch < this.currentEpoch) {
-      console.log(`⏰ 队列中发现过时任务，跳过: ${task.id} (Epoch ${task.epoch} < ${this.currentEpoch})`);
-      this.processQueue(); // 继续处理下一个任务
+    // 第二关口：开跑前检查epoch有效性
+    if (task.epoch !== this.currentEpoch) {
+      console.log(`🚫 Worker任务已过期，跳过执行: ${task.id} (Epoch ${task.epoch} vs ${this.currentEpoch})`);
+      // 继续处理队列
+      setTimeout(() => this.processQueue(), 0);
       return;
     }
 
@@ -233,6 +251,7 @@ export class WorkerTileLoader {
         type: 'load-tile',
         id: task.id,
         url: task.url,
+        epoch: task.epoch, // 传递epoch给worker
         options: task.options || {}
       });
     }
@@ -242,65 +261,48 @@ export class WorkerTileLoader {
   }
 
   /**
-   * 加载瓦片
+   * 加载瓦片 - 保持兼容性，建议使用reconcile
    */
   loadTile(
     id: string, 
     url: string, 
     priority: number = 100,
-    epoch: number = this.currentEpoch, // 新增epoch参数
-    options?: RequestInit
+    options?: RequestInit,
+    epoch?: number
   ): Promise<TileLoadResult> {
     if (this.isDestroyed) {
       return Promise.reject(new Error('WorkerTileLoader is destroyed'));
     }
 
-    // 完全禁用Epoch检查 - 让所有瓦片都能加载
-    // Epoch机制导致瓦片被取消后无法重新加载，暂时完全禁用
-    
-    // 调试：记录Worker任务 - 减少频率
-    if (Math.random() < 0.1) { // 只打印10%的任务
-      console.log(`🔄 Worker加载任务 (Epoch ${epoch}, current=${this.currentEpoch}): ${id}`);
-    }
+    // 使用传入的epoch或当前epoch
+    const taskEpoch = epoch ?? this.currentEpoch;
 
-    // 如果已经在处理中，检查epoch
+    // 如果已经在处理中，返回现有的Promise
     if (this.pendingTasks.has(id)) {
       const existing = this.pendingTasks.get(id)!;
-      if (existing.epoch >= epoch) {
-        // 现有任务的epoch更新或相同，返回现有Promise
-        return new Promise((resolve, reject) => {
-          const originalResolve = existing.resolve;
-          const originalReject = existing.reject;
-          this.pendingTasks.set(id, {
-            resolve: (result) => {
-              originalResolve(result);
-              resolve(result);
-            },
-            reject: (error) => {
-              originalReject(error);
-              reject(error);
-            },
-            epoch: existing.epoch
-          });
+      // 更新epoch
+      existing.epoch = taskEpoch;
+      
+      return new Promise((resolve, reject) => {
+        this.pendingTasks.set(id, {
+          resolve: (result) => {
+            existing.resolve(result);
+            resolve(result);
+          },
+          reject: (error) => {
+            existing.reject(error);
+            reject(error);
+          },
+          epoch: taskEpoch
         });
-      } else {
-        // 新任务epoch更新，取消旧任务
-        existing.reject(new Error('Replaced by newer epoch task'));
-      }
+      });
     }
 
     return new Promise((resolve, reject) => {
-      this.pendingTasks.set(id, { resolve, reject, epoch });
+      this.pendingTasks.set(id, { resolve, reject, epoch: taskEpoch });
       
-      // 添加到队列（带去重检查）
-      const existingTaskIndex = this.taskQueue.findIndex(task => task.id === id);
-      if (existingTaskIndex >= 0) {
-        // 替换现有任务
-        this.taskQueue[existingTaskIndex] = { id, url, priority, epoch, options };
-      } else {
-        // 添加新任务
-        this.taskQueue.push({ id, url, priority, epoch, options });
-      }
+      // 添加到队列
+      this.taskQueue.push({ id, url, priority, epoch: taskEpoch, options });
       
       // 立即尝试处理队列
       this.processQueue();
@@ -346,9 +348,7 @@ export class WorkerTileLoader {
     // 取消这些任务
     toCancel.forEach(id => this.cancelTask(id));
     
-    if (toCancel.length > 0) {
-      console.log(`🗑️ Cancelled ${toCancel.length} distant tasks`);
-    }
+    console.log(`🗑️ Cancelled ${toCancel.length} distant tasks`);
   }
 
   /**
@@ -373,8 +373,7 @@ export class WorkerTileLoader {
       activeTasks: this.activeTasks.size,
       queuedTasks: this.taskQueue.length,
       pendingTasks: this.pendingTasks.size,
-      maxConcurrency: this.config.maxConcurrency,
-      currentEpoch: this.currentEpoch
+      maxConcurrency: this.config.maxConcurrency
     };
   }
 
