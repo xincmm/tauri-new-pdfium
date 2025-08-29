@@ -80,17 +80,21 @@ export const PdfContent: React.FC<PdfContentProps> = ({
     return getVisiblePages(pageLayouts, containerHeight, viewState.scrollY);
   }, [pageLayouts, viewState.scrollY, containerRef]);
 
-  // 智能扩展可见页面：滚动时只包含可见页面，静止时包含相邻预加载页面
+  // 智能扩展可见页面：快滚只显示可见页，慢滚+静止时包含相邻预加载页面
   const expandedVisiblePages = React.useMemo(() => {
     if (!containerRef.current) return [];
     
-    // 滚动中只返回可见页面，避免队列爆炸
-    if (isScrolling) {
-      console.log(`📱 滚动中只渲染可见页面: [${visiblePages.map(p => p.pageIndex + 1).join(', ')}]`);
+    const scrollMetrics = getScrollMetrics();
+    const scrollVelocity = Math.abs(scrollMetrics.velocity.vy);
+    const isFastScrolling = scrollVelocity > 2; // 快速滚动阈值：2px/ms
+    
+    // 快速滚动时只返回可见页面，避免队列爆炸
+    if (isScrolling && isFastScrolling) {
+      console.log(`⚡ 快速滚动只渲染可见页面: [${visiblePages.map(p => p.pageIndex + 1).join(', ')}] (速度: ${scrollVelocity.toFixed(2)})`);
       return visiblePages;
     }
     
-    // 静止时添加相邻2页进行预加载
+    // 慢速滚动或静止时添加相邻2页进行预加载
     if (focusPageIndex !== null) {
       const preloadPageIndices = new Set<number>();
       
@@ -109,13 +113,14 @@ export const PdfContent: React.FC<PdfContentProps> = ({
         .sort((a, b) => a - b)
         .map(pageIndex => pageLayouts[pageIndex]);
       
-      console.log(`🔮 静止时扩展页面: [${expandedPages.map(p => p.pageIndex + 1).join(', ')}] (焦点: ${focusPageIndex + 1})`);
+      const status = isScrolling ? `慢滚(${scrollVelocity.toFixed(2)})` : '静止';
+      console.log(`🔮 ${status}时扩展页面: [${expandedPages.map(p => p.pageIndex + 1).join(', ')}] (焦点: ${focusPageIndex + 1})`);
       return expandedPages;
     }
     
     // 回退到基本可见页面
     return visiblePages;
-  }, [pageLayouts, visiblePages, isScrolling, focusPageIndex]);
+  }, [pageLayouts, visiblePages, isScrolling, focusPageIndex, getScrollMetrics]);
 
   // 检测焦点页面（视口中心的页面）
   const detectFocusPage = useCallback(() => {
