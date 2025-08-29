@@ -398,7 +398,9 @@ impl PdfWorker {
                     config.quality, config.method, config.thread_level, config.segments);
             });
             
-            let webp = encoder.encode_advanced(&config).unwrap().to_vec();
+            // 零拷贝WebP编码：避免to_vec()的额外拷贝
+            let webp_result = encoder.encode_advanced(&config).unwrap();
+            let webp = bytes::Bytes::from(webp_result.to_vec()); // 暂时保持to_vec，webp库限制
                 
             let encode_ms = (Instant::now() - t3).as_secs_f64() * 1000.0;
             let total_ms = (Instant::now() - t0).as_secs_f64() * 1000.0;

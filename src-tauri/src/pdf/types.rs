@@ -14,7 +14,7 @@ pub const MIN_DPI: f32 = 36.0;
 // 瓦片渲染结果，包含数据和性能统计
 #[derive(Debug, Clone)]
 pub struct TileRenderResult {
-    pub data: Vec<u8>,
+    pub data: bytes::Bytes, // 零拷贝优化：使用Bytes而不是Vec<u8>
     pub setup_ms: f64,
     pub raster_ms: f64,
     pub pack_ms: f64,

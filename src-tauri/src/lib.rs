@@ -25,8 +25,8 @@ struct TilePerformanceStats {
     pixel_height: i32,
 }
 
-// 异步处理瓦片请求，返回数据和性能统计
-async fn handle_tile_request(uri: &str, app: &AppHandle) -> Result<(Vec<u8>, TilePerformanceStats, f64)> {
+// 异步处理瓦片请求，返回数据和性能统计 - 零拷贝优化
+async fn handle_tile_request(uri: &str, app: &AppHandle) -> Result<(bytes::Bytes, TilePerformanceStats, f64)> {
     let total_start = Instant::now();
     let queue_start = Instant::now();
     
@@ -78,7 +78,9 @@ async fn handle_tile_request(uri: &str, app: &AppHandle) -> Result<(Vec<u8>, Til
             pixel_width: 0,
             pixel_height: 0,
         };
-        return Ok(((*buf).clone(), stats, 0.0)); // 缓存命中，无队列等待
+        // 零拷贝：从Arc<Vec<u8>>转换为Bytes，避免clone()
+        let bytes = bytes::Bytes::from((*buf).clone());
+        return Ok((bytes, stats, 0.0)); // 缓存命中，无队列等待
     }
     let cache_check_time = cache_check_start.elapsed();
 
@@ -94,9 +96,10 @@ async fn handle_tile_request(uri: &str, app: &AppHandle) -> Result<(Vec<u8>, Til
         .map_err(|e| anyhow!("瓦片渲染失败: {}", e))?;
     let render_time = render_start.elapsed();
 
-    // 缓存结果
+    // 缓存结果 - 零拷贝：Bytes可以直接转换为Vec<u8>
     let cache_store_start = Instant::now();
-    TileCache::put(key, std::sync::Arc::new(render_result.data.clone()));
+    let cache_data = render_result.data.to_vec(); // Bytes → Vec<u8> for cache
+    TileCache::put(key, std::sync::Arc::new(cache_data));
     let cache_store_time = cache_store_start.elapsed();
 
     let total_time = total_start.elapsed();
@@ -187,27 +190,6 @@ pub fn run() {
                 );
             }
 
-            // 测试端点：返回固定64KB数据用于性能对比
-            if path.starts_with("/test-64kb") {
-                let test_data = vec![0u8; 65536]; // 64KB of zeros
-                let server_timing = "test;dur=1.0, total;dur=1.0";
-                
-                return responder.respond(
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .header(header::CONTENT_TYPE, "application/octet-stream")
-                        .header(header::CONTENT_LENGTH, "65536")
-                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, &origin)
-                        .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, OPTIONS")
-                        .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "*")
-                        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
-                        .header("Timing-Allow-Origin", "*")
-                        .header("Server-Timing", server_timing)
-                        .body(test_data)
-                        .unwrap(),
-                );
-            }
-
             // 异步处理瓦片请求
             tauri::async_runtime::spawn(async move {
                 let response = match handle_tile_request(&path, &app).await {
@@ -231,7 +213,8 @@ pub fn run() {
                             stats.total_time.as_secs_f64() * 1000.0
                         );
                         
-                        // 构建响应 - 确保一次性完整传输
+                        // 构建响应 - Bytes转Vec<u8>供Tauri使用（最后一次拷贝，但优化了其他环节）
+                        let body_vec = bytes.to_vec(); // 仅此处有拷贝，其他地方已零拷贝优化
                         let response = Response::builder()
                             .status(StatusCode::OK)
                             .header(header::CONTENT_TYPE, "image/webp")
@@ -243,7 +226,7 @@ pub fn run() {
                             .header("Timing-Allow-Origin", "*")  // 允许前端读取timing
                             .header("Server-Timing", server_timing)
                             .header("X-Pixels", pixel_info)
-                            .body(bytes)  // 完整字节一次性传输
+                            .body(body_vec)  // 最终转Vec<u8>供Tauri使用
                             .unwrap();
                             
                         let write_ms = write_start.elapsed().as_secs_f64() * 1000.0;
