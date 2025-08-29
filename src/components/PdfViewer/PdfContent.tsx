@@ -55,6 +55,9 @@ export const PdfContent: React.FC<PdfContentProps> = ({
   const [focusPageIndex, setFocusPageIndex] = useState<number | null>(null);
   const lastFocusPageRef = useRef<number | null>(null);
   
+  // 调试面板展开状态
+  const [isDebugPanelExpanded, setIsDebugPanelExpanded] = useState<boolean>(true);
+  
   const { crossPageSelection, setCrossPageSelection } = pdfState;
 
   // 缩放变化时清理缓存
@@ -87,7 +90,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
     
     const scrollMetrics = getScrollMetrics();
     const scrollVelocity = Math.abs(scrollMetrics.velocity.vy);
-    const isFastScrolling = scrollVelocity > 2; // 快速滚动阈值：2px/ms
+    const isFastScrolling = scrollVelocity > 6; // 快速滚动阈值：2px/ms
     
     // 快速滚动时只返回可见页面，避免队列爆炸
     if (isScrolling && isFastScrolling) {
@@ -156,7 +159,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
   // 快速滚动检测和焦点页面管理
   useEffect(() => {
     const scrollMetrics = getScrollMetrics();
-    const isRapidScrolling = Math.abs(scrollMetrics.velocity.vy) > 2; // 速度阈值 2px/ms
+    const isRapidScrolling = Math.abs(scrollMetrics.velocity.vy) > 6; // 速度阈值 2px/ms
     
     if (isScrolling) {
       const currentFocusPage = detectFocusPage();
@@ -526,7 +529,7 @@ export const PdfContent: React.FC<PdfContentProps> = ({
         <div
           style={{
             position: 'fixed',
-            bottom: '20px',
+            bottom: '80px',
             right: '20px',
             background: 'rgba(0, 0, 0, 0.8)',
             color: 'white',
@@ -568,11 +571,34 @@ export const PdfContent: React.FC<PdfContentProps> = ({
             fontSize: '11px',
             fontFamily: 'monospace',
             zIndex: 2000,
-            minWidth: '280px',
+            minWidth: isDebugPanelExpanded ? '280px' : '120px',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease',
           }}
         >
-          <div style={{ fontWeight: 'bold', marginBottom: '8px' }}>渲染队列状态</div>
-          {(() => {
+          <div 
+            style={{ 
+              fontWeight: 'bold', 
+              marginBottom: isDebugPanelExpanded ? '8px' : '0',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              userSelect: 'none',
+            }}
+            onClick={() => setIsDebugPanelExpanded(!isDebugPanelExpanded)}
+          >
+            <span>渲染队列状态</span>
+            <span style={{ 
+              fontSize: '10px', 
+              color: '#ccc',
+              transform: isDebugPanelExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+              transition: 'transform 0.2s ease'
+            }}>
+              ▼
+            </span>
+          </div>
+          
+          {isDebugPanelExpanded && (() => {
             const queueStatus = globalTaskQueue.getQueueStatus();
             const scrollMetrics = getScrollMetrics();
             const perfAnalysis = performanceMonitor.getBottleneckAnalysis();
