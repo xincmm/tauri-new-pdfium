@@ -4,7 +4,7 @@ import { PdfViewerV2 } from './components/PdfViewer/PdfViewerV2';
 import './App.css';
 
 function App() {
-  const [useV2, setUseV2] = useState(false);
+  const [useV2, setUseV2] = useState(true); // 默认使用插件架构版本
 
   return (
     <div className="App">
