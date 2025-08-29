@@ -9,7 +9,10 @@ import {
 } from '../../../types/pdf';
 import { usePdfState } from '../../../hooks/usePdfState';
 import { getVisiblePages, getExpandedVisiblePages } from '../../../utils/pdfLayout';
-import { generateTileKey } from '../../../utils/tileUtils';
+// 生成瓦片缓存键
+const generateTileKey = (tileInfo: { id: string; page: number; scale: number; tx: number; ty: number }): string => {
+  return `${tileInfo.id}_${tileInfo.page}_${tileInfo.scale}_${tileInfo.tx}_${tileInfo.ty}`;
+};
 
 interface UseTileLoaderProps {
   isScrolling: boolean;

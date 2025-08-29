@@ -35,7 +35,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "sidecars/libpdfium.dylib-aarch64-apple-darwin"
+      "runtime/libpdfium.dylib-aarch64-apple-darwin"
     ]
   }
 }

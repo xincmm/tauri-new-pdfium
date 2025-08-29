@@ -1,574 +1,403 @@
-use crate::pdf::types::{self, *};
-use anyhow::{anyhow, Result};
+use crate::pdf::types::*;
+use uuid::Uuid;
+use anyhow::Result;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use pdfium_render::prelude::*;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::time::Instant;
-use uuid::Uuid;
 
-// PDF工作线程的消息定义
-pub enum PdfCmd {
-    Open {
-        id: String,
-        bytes: Vec<u8>,
-        resp: Sender<Result<types::PdfMetadata>>,
+// 瓦片请求数据结构
+#[derive(serde::Deserialize, Debug)]
+pub struct TileRequest {
+    pub page_index: u16,
+    pub rect_x: f32,
+    pub rect_y: f32, 
+    pub rect_width: f32,
+    pub rect_height: f32,
+    pub scale_factor: f32,
+    pub dpr: f32,
+}
+
+// 瓦片渲染结果
+#[derive(Debug, Clone)]
+pub struct TileRenderResult {
+    pub data: Vec<u8>,
+    pub setup_ms: f64,
+    pub raster_ms: f64,
+    pub pack_ms: f64,
+    pub encode_ms: f64,
+    pub total_ms: f64,
+    pub pixel_width: i32,
+    pub pixel_height: i32,
+}
+
+// PDF工作线程的命令
+pub enum PdfCommand {
+    LoadDocument {
+        file_path: String,
+        resp: Sender<Result<PdfDocumentMetadata, String>>,
     },
-    RenderTile {
-        id: String,
-        page: u32,
-        scale_x100: u32,
-        tx_idx: u32,
-        ty_idx: u32,
-        resp: Sender<Result<TileRenderResult>>,
-    },
-    TextLayout {
-        id: String,
-        page: u32,
-        resp: Sender<Result<PageTextLayout>>,
-    },
-    ExtractRange {
-        id: String,
-        page: u32,
-        start: u32,
-        end: u32,
-        resp: Sender<Result<String>>,
-    },
-    Close {
-        id: String,
+    RenderTilesBatch {
+        requests: Vec<TileRequest>,
+        resp: Sender<Result<Vec<TileRenderResult>, String>>,
     },
     Shutdown,
 }
 
-// PDF工作线程的句柄，用于发送消息
-#[derive(Clone)]
-pub struct PdfWorkerHandle {
-    pub tx: Sender<PdfCmd>,
+// 文档条目，长期驻留在工作线程中
+struct DocumentEntry {
+    bytes: Vec<u8>,
+    doc: FPDF_DOCUMENT,
+    page_dims: Vec<(f32, f32)>,
+    pages: HashMap<u32, FPDF_PAGE>,
 }
 
-impl PdfWorkerHandle {
-    pub fn send_cmd(&self, cmd: PdfCmd) -> Result<()> {
-        self.tx
-            .send(cmd)
-            .map_err(|e| anyhow!("Failed to send command: {}", e))
+impl DocumentEntry {
+    fn cleanup(&mut self, bindings: &dyn PdfiumLibraryBindings) {
+        unsafe {
+            // 释放所有页句柄
+            for (_, page_handle) in self.pages.drain() {
+                bindings.FPDF_ClosePage(page_handle);
+            }
+            // 释放文档句柄
+            bindings.FPDF_CloseDocument(self.doc);
+        }
     }
 
-    pub fn open_document(&self, bytes: Vec<u8>) -> Result<types::PdfMetadata> {
-        let id = Uuid::new_v4().to_string();
-        let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-
-        self.send_cmd(PdfCmd::Open {
-            id: id.clone(),
-            bytes,
-            resp: resp_tx,
-        })?;
-
-        resp_rx
-            .recv()
-            .map_err(|e| anyhow!("Failed to receive response: {}", e))?
-    }
-
-    pub fn render_tile(
-        &self,
-        id: String,
+    fn get_or_load_page(
+        &mut self,
         page: u32,
-        scale_x100: u32,
-        tx_idx: u32,
-        ty_idx: u32,
-    ) -> Result<TileRenderResult> {
-        let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-
-        self.send_cmd(PdfCmd::RenderTile {
-            id,
-            page,
-            scale_x100,
-            tx_idx,
-            ty_idx,
-            resp: resp_tx,
-        })?;
-
-        resp_rx
-            .recv()
-            .map_err(|e| anyhow!("Failed to receive response: {}", e))?
-    }
-
-    pub fn get_text_layout(&self, id: String, page: u32) -> Result<PageTextLayout> {
-        let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-
-        self.send_cmd(PdfCmd::TextLayout {
-            id,
-            page,
-            resp: resp_tx,
-        })?;
-
-        resp_rx
-            .recv()
-            .map_err(|e| anyhow!("Failed to receive response: {}", e))?
-    }
-
-    pub fn extract_text_range(
-        &self,
-        id: String,
-        page: u32,
-        start: u32,
-        end: u32,
-    ) -> Result<String> {
-        let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
-
-        self.send_cmd(PdfCmd::ExtractRange {
-            id,
-            page,
-            start,
-            end,
-            resp: resp_tx,
-        })?;
-
-        resp_rx
-            .recv()
-            .map_err(|e| anyhow!("Failed to receive response: {}", e))?
-    }
-
-    pub fn close_document(&self, id: String) -> Result<()> {
-        self.send_cmd(PdfCmd::Close { id })
-    }
-
-    pub fn shutdown(&self) -> Result<()> {
-        self.send_cmd(PdfCmd::Shutdown)
+        bindings: &dyn PdfiumLibraryBindings,
+    ) -> Option<FPDF_PAGE> {
+        if let Some(&page_handle) = self.pages.get(&page) {
+            return Some(page_handle);
+        }
+        
+        unsafe {
+            let page_handle = bindings.FPDF_LoadPage(self.doc, page as i32);
+            if !page_handle.is_null() {
+                self.pages.insert(page, page_handle);
+                Some(page_handle)
+            } else {
+                None
+            }
+        }
     }
 }
 
 // PDF工作线程
 pub struct PdfWorker {
     pdfium: Pdfium,
-    docs: HashMap<String, DocEntry>,
-    rx: Receiver<PdfCmd>,
+    document: Option<DocumentEntry>,
+    rx: Receiver<PdfCommand>,
 }
 
 impl PdfWorker {
-    pub fn new(library_path: String, rx: Receiver<PdfCmd>) -> Result<Self> {
+    pub fn new(library_path: String, rx: Receiver<PdfCommand>) -> Result<Self, String> {
         let bindings = Pdfium::bind_to_library(&library_path)
             .or_else(|_| Pdfium::bind_to_system_library())
-            .map_err(|e| anyhow!("Failed to bind Pdfium library: {}", e))?;
-
+            .map_err(|e| format!("Failed to bind Pdfium library: {}", e))?;
+        
         let pdfium = Pdfium::new(bindings);
-
         println!("🔧 PDF工作线程启动，Pdfium库路径: {}", library_path);
-
+        
         Ok(Self {
             pdfium,
-            docs: HashMap::new(),
+            document: None,
             rx,
         })
     }
 
     pub fn run(&mut self) {
         println!("🚀 PDF工作线程开始运行");
-
+        
         while let Ok(cmd) = self.rx.recv() {
             match cmd {
-                PdfCmd::Open { id, bytes, resp } => {
-                    let result = self.handle_open(id, bytes);
+                PdfCommand::LoadDocument { file_path, resp } => {
+                    let result = self.handle_load_document(file_path);
                     let _ = resp.send(result);
                 }
-                PdfCmd::RenderTile {
-                    id,
-                    page,
-                    scale_x100,
-                    tx_idx,
-                    ty_idx,
-                    resp,
-                } => {
-                    let result = self.handle_render_tile(id, page, scale_x100, tx_idx, ty_idx);
+                PdfCommand::RenderTilesBatch { requests, resp } => {
+                    let result = self.handle_render_tiles_batch(requests);
                     let _ = resp.send(result);
                 }
-                PdfCmd::TextLayout { id, page, resp } => {
-                    let result = self.handle_text_layout(id, page);
-                    let _ = resp.send(result);
-                }
-                PdfCmd::ExtractRange {
-                    id,
-                    page,
-                    start,
-                    end,
-                    resp,
-                } => {
-                    let result = self.handle_extract_range(id, page, start, end);
-                    let _ = resp.send(result);
-                }
-                PdfCmd::Close { id } => {
-                    self.handle_close(id);
-                }
-                PdfCmd::Shutdown => {
+                PdfCommand::Shutdown => {
                     println!("📴 PDF工作线程收到关闭信号");
-                    self.cleanup_all_docs();
+                    self.cleanup();
                     break;
                 }
             }
         }
-
+        
         println!("🛑 PDF工作线程已停止");
     }
 
-    fn handle_open(&mut self, id: String, bytes: Vec<u8>) -> Result<types::PdfMetadata> {
+    fn handle_load_document(&mut self, file_path: String) -> Result<PdfDocumentMetadata, String> {
         let start_time = Instant::now();
+        
+        // 读取文件
+        let bytes = std::fs::read(&file_path)
+            .map_err(|e| format!("文件读取失败: {}", e))?;
 
+                let bindings = self.pdfium.bindings();
         unsafe {
-            // 使用 FPDF_LoadMemDocument64 加载文档
-            let bindings = self.pdfium.bindings();
-            let doc = bindings.FPDF_LoadMemDocument64(&bytes, None);
-
-            if doc.is_null() {
-                return Err(anyhow!("FPDF_LoadMemDocument64 failed"));
+            // 清理现有文档
+            if let Some(mut old_doc) = self.document.take() {
+                old_doc.cleanup(bindings);
             }
-
+            
+            // 加载新文档
+            let doc = bindings.FPDF_LoadMemDocument64(&bytes, None);
+            if doc.is_null() {
+                return Err("FPDF_LoadMemDocument64 failed".to_string());
+            }
+            
             let page_count = bindings.FPDF_GetPageCount(doc) as u32;
             let mut page_dims = Vec::with_capacity(page_count as usize);
-
+            
             for i in 0..page_count {
-                let mut size = pdfium_render::prelude::FS_SIZEF {
-                    width: 0.0,
-                    height: 0.0,
-                };
+                let mut size = FS_SIZEF { width: 0.0, height: 0.0 };
                 bindings.FPDF_GetPageSizeByIndexF(doc, i as i32, &mut size);
                 page_dims.push((size.width, size.height));
             }
-
-            // 如果已存在同ID文档，先清理
-            if let Some(mut old_entry) = self.docs.remove(&id) {
-                old_entry.cleanup(bindings);
-            }
-
-            // 创建新的文档条目
-            let doc_entry = DocEntry::new(bytes, doc, page_dims.clone(), page_count);
-            self.docs.insert(id.clone(), doc_entry);
-
-            let metadata = types::PdfMetadata {
-                id,
+            
+            self.document = Some(DocumentEntry {
+                bytes,
+                doc,
+                page_dims: page_dims.clone(),
+                pages: HashMap::new(),
+            });
+            
+            // 生成文档ID
+            let doc_id = Uuid::new_v4().to_string();
+            
+            let metadata = PdfDocumentMetadata {
+                id: doc_id.clone(),
                 total_pages: page_count,
-                page_dims,
+                page_dims: page_dims.clone(),
             };
-
+            
             println!(
-                "✅ PDF文档加载完成，耗时: {:?}, 页数: {}",
+                "✅ PDF文档加载完成，耗时: {:?}, 页数: {}, ID: {}",
                 start_time.elapsed(),
-                page_count
+                page_count,
+                doc_id
             );
+            println!("📏 页面尺寸: {:?}", page_dims);
+            
             Ok(metadata)
         }
     }
 
-    fn handle_render_tile(
-        &mut self,
-        id: String,
-        page: u32,
-        scale_x100: u32,
-        tx_idx: u32,
-        ty_idx: u32,
-    ) -> Result<TileRenderResult> {
-        let _total_start = Instant::now();
-
-        let entry = self
-            .docs
-            .get_mut(&id)
-            .ok_or_else(|| anyhow!("Document not found: {}", id))?;
-
-        entry.update_last_used();
-
-        let (w_pt, h_pt) = entry.page_dims[page as usize];
-        let zoom = scale_x100 as f32 / 100.0;
-        let effective_dpi = (BASE_DPI * zoom).clamp(MIN_DPI, MAX_DPI);
-        let s = effective_dpi / 72.0;
-
-        let w_px = ((w_pt / 72.0) * effective_dpi).ceil() as i32;
-        let h_px = ((h_pt / 72.0) * effective_dpi).ceil() as i32;
-
-        let dpi_scale = effective_dpi / BASE_DPI;
-        let tile = (TILE_SIZE as f32 * dpi_scale).round() as i32;
-        let x_px = tx_idx as i32 * tile;
-        let y_px = ty_idx as i32 * tile;
-
-        if x_px >= w_px || y_px >= h_px {
-            return Err(anyhow!("Tile out of bounds"));
-        }
-
-        let tw = std::cmp::min(tile, w_px - x_px).max(1);
-        let th = std::cmp::min(tile, h_px - y_px).max(1);
-
-        unsafe {
-            let t0 = Instant::now();
-            
-            // 0) 设置阶段 - 获取页面、创建位图等
-            let setup_start = Instant::now();
-            
-            // 获取或加载页面
-            let bindings = self.pdfium.bindings();
-            let page_handle = entry
-                .get_or_load_page(page, bindings)
-                .ok_or_else(|| anyhow!("Failed to load page {}", page))?;
-
-            // 创建位图
-            let bmp = bindings.FPDFBitmap_CreateEx(tw, th, 4, std::ptr::null_mut(), 0);
-            if bmp.is_null() {
-                return Err(anyhow!("FPDFBitmap_CreateEx failed"));
+    fn handle_render_tiles_batch(&mut self, requests: Vec<TileRequest>) -> Result<Vec<TileRenderResult>, String> {
+        let batch_start = Instant::now();
+        
+        let document = self.document.as_mut()
+            .ok_or("No document loaded")?;
+        
+        println!("开始批量渲染 {} 个瓦片", requests.len());
+        
+        // 1. 串行渲染阶段 - 生成所有瓦片的原始数据
+        let bindings = self.pdfium.bindings();
+        let mut tiles_data = Vec::new();
+        for (idx, req) in requests.iter().enumerate() {
+            if let Some(tile_data) = Self::render_single_tile(bindings, document, req, idx) {
+                tiles_data.push(tile_data);
             }
-
-            // 填充背景
-            bindings.FPDFBitmap_FillRect(bmp, 0, 0, tw, th, 0x00000000);
+        }
+        
+        let rendering_done = Instant::now();
+        println!("--- 串行渲染完成: {} 个瓦片，耗时: {:?} ---", 
+                tiles_data.len(), rendering_done - batch_start);
+        
+        // 2. 并行编码阶段 - 使用rayon并行编码
+        let encoded_results: Vec<TileRenderResult> = tiles_data
+            .into_par_iter()
+            .map(|(rgba_data, width, height, setup_ms, raster_ms, pack_ms)| {
+                let encode_start = Instant::now();
+                
+                // 使用webp编码
+                let webp_data = webp::Encoder::from_rgba(&rgba_data, width as u32, height as u32).encode(80.0);
+                let encode_ms = encode_start.elapsed().as_secs_f64() * 1000.0;
+                let total_ms = setup_ms + raster_ms + pack_ms + encode_ms;
+                
+                println!("瓦片编码完成: {}x{} in {:.2}ms", width, height, encode_ms);
+                
+                TileRenderResult {
+                    data: webp_data.to_vec(),
+                    setup_ms,
+                    raster_ms,
+                    pack_ms,
+                    encode_ms,
+                    total_ms,
+                    pixel_width: width,
+                    pixel_height: height,
+                }
+            })
+            .collect();
+        
+        let encoding_done = Instant::now();
+        println!("--- 并行编码完成: 耗时: {:?} ---", encoding_done - rendering_done);
+        println!("--- 总耗时: {:?} ---", batch_start.elapsed());
+        
+        Ok(encoded_results)
+    }
+    
+    fn render_single_tile(
+        pdfium_bindings: &dyn PdfiumLibraryBindings,
+        document: &mut DocumentEntry, 
+        req: &TileRequest, 
+        idx: usize
+    ) -> Option<(Vec<u8>, i32, i32, f64, f64, f64)> {
+        
+        let tile_start = Instant::now();
+        
+        // 0. 设置阶段
+        let setup_start = Instant::now();
+        
+        let page_handle = document.get_or_load_page(req.page_index as u32, pdfium_bindings)?;
+        
+        // 计算像素尺寸
+        // PDF坐标为 points（72dpi），屏幕像素以 96dpi 计；需要乘以 96/72 才能得到像素尺寸
+        let px_per_point: f32 = 96.0f32 / 72.0f32;
+        let target_width = (req.rect_width * req.scale_factor * req.dpr * px_per_point).round() as i32;
+        let target_height = (req.rect_height * req.scale_factor * req.dpr * px_per_point).round() as i32;
+        
+        unsafe {
+            // 创建位图
+            let bitmap = pdfium_bindings.FPDFBitmap_CreateEx(
+                target_width, target_height, 4, std::ptr::null_mut(), 0
+            );
+            if bitmap.is_null() {
+                eprintln!("FPDFBitmap_CreateEx failed for tile {}", idx);
+                return None;
+            }
             
+            // 填充白色背景
+            pdfium_bindings.FPDFBitmap_FillRect(bitmap, 0, 0, target_width, target_height, 0xFFFFFFFF);
             let setup_ms = setup_start.elapsed().as_secs_f64() * 1000.0;
             
-            // 1) 光栅化/渲染阶段
-            let t1 = Instant::now();
-
-            // 计算渲染矩阵
-            let bleed_pt = 1.0 / s;
-            let left_pt = (x_px as f32) / s - bleed_pt;
-            let top_pt = (y_px as f32) / s - bleed_pt;
-
-            let mut matrix = pdfium_render::prelude::FS_MATRIX {
-                a: s,
+            // 1. 光栅化阶段
+            let raster_start = Instant::now();
+            
+            // 计算渲染矩阵以实现区域裁剪
+            // 将 points → pixels 的换算一并纳入矩阵缩放
+            let scale = req.scale_factor * req.dpr * px_per_point;
+            
+            // 渲染矩阵：缩放并平移到指定区域
+            let mut matrix = FS_MATRIX {
+                a: scale,  // x缩放
                 b: 0.0,
-                c: 0.0,
-                d: s,
-                e: -s * left_pt,
-                f: -s * top_pt,
+                c: 0.0, 
+                d: scale,  // y缩放
+                e: -req.rect_x * scale,  // x平移（负值向左移）
+                f: -req.rect_y * scale,  // y平移（负值向上移）
             };
-
-            let clip = pdfium_render::prelude::FS_RECTF {
+            
+            // 裁剪矩形
+            let clip = FS_RECTF {
                 left: 0.0,
                 top: 0.0,
-                right: tw as f32,
-                bottom: th as f32,
+                right: target_width as f32,
+                bottom: target_height as f32,
             };
-
-            // 渲染页面到位图
-            let flags = 0x01 | 0x02; // FPDF_LCD_TEXT | FPDF_ANNOT
-            bindings.FPDF_RenderPageBitmapWithMatrix(bmp, page_handle, &mut matrix, &clip, flags);
             
-            let raster_ms = (Instant::now() - t1).as_secs_f64() * 1000.0;
+            println!("瓦片 {} 渲染参数: 区域=({:.1},{:.1},{:.1},{:.1}), 缩放={:.1}, 目标={}x{}", 
+                idx, req.rect_x, req.rect_y, req.rect_width, req.rect_height, scale, target_width, target_height);
             
-            // 2) 颜色转换/打包阶段
-            let t2 = Instant::now();
-
-            // 获取像素数据并转换为RGBA
-            let buf = bindings.FPDFBitmap_GetBuffer(bmp) as *const u8;
-            let stride = bindings.FPDFBitmap_GetStride(bmp) as usize;
-            let src = std::slice::from_raw_parts(buf, stride * (th as usize));
-
-            let mut rgba = Vec::with_capacity((tw * th * 4) as usize);
-            for row in 0..(th as usize) {
-                let start = row * stride;
-                let row_bytes = &src[start..start + (tw as usize) * 4];
-                // BGRA -> RGBA
-                for px in row_bytes.chunks_exact(4) {
-                    rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+            // 使用矩阵渲染指定区域
+            pdfium_bindings.FPDF_RenderPageBitmapWithMatrix(
+                bitmap,
+                page_handle,
+                &mut matrix,
+                &clip,
+                0x01 | 0x02, // FPDF_LCD_TEXT | FPDF_ANNOT
+            );
+            
+            let raster_ms = raster_start.elapsed().as_secs_f64() * 1000.0;
+            
+            // 2. 打包阶段 - 转换颜色格式
+            let pack_start = Instant::now();
+            
+            let buffer = pdfium_bindings.FPDFBitmap_GetBuffer(bitmap) as *const u8;
+            let stride = pdfium_bindings.FPDFBitmap_GetStride(bitmap) as usize;
+            let src_data = std::slice::from_raw_parts(
+                buffer, 
+                stride * target_height as usize
+            );
+            
+            // 转换 BGRA -> RGBA
+            let mut rgba_data = Vec::with_capacity((target_width * target_height * 4) as usize);
+            for row in 0..target_height {
+                let row_start = (row as usize) * stride;
+                let row_data = &src_data[row_start..row_start + (target_width as usize * 4)];
+                
+                for pixel in row_data.chunks_exact(4) {
+                    rgba_data.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
                 }
             }
-
-            // 销毁位图
-            bindings.FPDFBitmap_Destroy(bmp);
             
-            let pack_ms = (Instant::now() - t2).as_secs_f64() * 1000.0;
+            pdfium_bindings.FPDFBitmap_Destroy(bitmap);
+            let pack_ms = pack_start.elapsed().as_secs_f64() * 1000.0;
             
-            // 3) WebP编码阶段
-            let t3 = Instant::now();
-
-            // 编码为WebP - 使用高级优化参数
-            use webp::{Encoder, WebPConfig};
-            
-            let encoder = Encoder::from_rgba(&rgba, tw as u32, th as u32);
-            
-            // 创建高级配置 - 优化速度
-            let mut config = WebPConfig::new().unwrap();
-            config.quality = WEBP_QUALITY as f32;
-            config.method = WEBP_METHOD as i32;
-            config.thread_level = WEBP_THREAD_LEVEL as i32;
-            config.segments = WEBP_SEGMENTS as i32;
-            
-            // 额外的速度优化设置
-            config.target_size = 0;  // 不限制目标大小，优先速度
-            config.target_PSNR = 0.0; // 不限制PSNR，优先速度
-            config.pass = 1;         // 单次编码，最快
-            config.preprocessing = 0; // 跳过预处理，提升速度
-            config.partition_limit = 0; // 不限制分区，提升速度
-            
-            // 调试配置信息（仅在第一次打印）
-            static FIRST_CONFIG_LOG: std::sync::Once = std::sync::Once::new();
-            FIRST_CONFIG_LOG.call_once(|| {
-                println!("🔧 WebP配置: 质量={} | 方法={} | 线程={} | 分段={}", 
-                    config.quality, config.method, config.thread_level, config.segments);
-            });
-            
-            // 零拷贝WebP编码：避免to_vec()的额外拷贝
-            let webp_result = encoder.encode_advanced(&config).unwrap();
-            let webp = bytes::Bytes::from(webp_result.to_vec()); // 暂时保持to_vec，webp库限制
-                
-            let encode_ms = (Instant::now() - t3).as_secs_f64() * 1000.0;
-            let total_ms = (Instant::now() - t0).as_secs_f64() * 1000.0;
-
-            // 详细的性能分析日志
-            let pixel_count = tw * th;
-            let megapixels = pixel_count as f64 / 1_000_000.0;
-            
+            let total_render_ms = tile_start.elapsed().as_secs_f64() * 1000.0;
             println!(
-                "🚀 瓦片渲染完成 - 页面:{} 瓦片:{}x{} 缩放:{} 像素:{}x{}({:.2}MP)",
-                page, tx_idx, ty_idx, scale_x100, tw, th, megapixels
-            );
-            println!(
-                "⏱️  阶段耗时: 设置={:.2}ms | 光栅={:.2}ms | 打包={:.2}ms | 编码={:.2}ms | 总计={:.2}ms",
-                setup_ms, raster_ms, pack_ms, encode_ms, total_ms
+                "瓦片 {} 渲染完成: {}x{} in {:.2}ms (设置:{:.2}ms + 光栅:{:.2}ms + 打包:{:.2}ms)",
+                idx, target_width, target_height, total_render_ms, setup_ms, raster_ms, pack_ms
             );
             
-            // 计算编码相关的性能指标
-            let encode_mpixels_per_sec = (pixel_count as f64 / 1_000_000.0) / (encode_ms / 1000.0);
-            let compression_ratio = (pixel_count * 4) as f64 / webp.len() as f64;
-            
-            println!(
-                "📊 性能指标: 总速度={:.0}像素/ms | 编码速度={:.1}MP/s | 压缩比={:.1}:1 | 文件大小={:.1}KB",
-                pixel_count as f64 / total_ms,
-                encode_mpixels_per_sec,
-                compression_ratio,
-                webp.len() as f64 / 1024.0
-            );
-
-            Ok(TileRenderResult {
-                data: webp,
-                setup_ms,
-                raster_ms,
-                pack_ms,
-                encode_ms,
-                total_ms,
-                pixel_width: tw,
-                pixel_height: th,
-            })
+            Some((rgba_data, target_width, target_height, setup_ms, raster_ms, pack_ms))
         }
     }
 
-    fn handle_text_layout(&mut self, id: String, page: u32) -> Result<PageTextLayout> {
-        let entry = self
-            .docs
-            .get_mut(&id)
-            .ok_or_else(|| anyhow!("Document not found: {}", id))?;
-
-        entry.update_last_used();
-
-        let (w_pt, h_pt) = entry.page_dims[page as usize];
-
-        unsafe {
+    fn cleanup(&mut self) {
+        if let Some(mut document) = self.document.take() {
             let bindings = self.pdfium.bindings();
-            let page_handle = entry
-                .get_or_load_page(page, bindings)
-                .ok_or_else(|| anyhow!("Failed to load page {}", page))?;
-
-            // 加载文本页面
-            let text_page = bindings.FPDFText_LoadPage(page_handle);
-            if text_page.is_null() {
-                return Err(anyhow!("FPDFText_LoadPage failed"));
-            }
-
-            let count = bindings.FPDFText_CountChars(text_page) as i32;
-            let mut chars = Vec::with_capacity(count as usize);
-
-            for i in 0..count {
-                let ch = bindings.FPDFText_GetUnicode(text_page, i);
-
-                let mut left = 0f64;
-                let mut right = 0f64;
-                let mut bottom = 0f64;
-                let mut top = 0f64;
-                bindings.FPDFText_GetCharBox(
-                    text_page,
-                    i,
-                    &mut left,
-                    &mut right,
-                    &mut bottom,
-                    &mut top,
-                );
-
-                chars.push(CharBox {
-                    idx: i as u32,
-                    ch: std::char::from_u32(ch as u32).unwrap_or(' ').to_string(),
-                    left: left as f32,
-                    right: right as f32,
-                    top: top as f32,
-                    bottom: bottom as f32,
-                });
-            }
-
-            bindings.FPDFText_ClosePage(text_page);
-
-            Ok(PageTextLayout {
-                width_pt: w_pt,
-                height_pt: h_pt,
-                chars,
-            })
-        }
-    }
-
-    fn handle_extract_range(
-        &mut self,
-        id: String,
-        page: u32,
-        start: u32,
-        end: u32,
-    ) -> Result<String> {
-        let entry = self
-            .docs
-            .get_mut(&id)
-            .ok_or_else(|| anyhow!("Document not found: {}", id))?;
-
-        entry.update_last_used();
-
-        unsafe {
-            let bindings = self.pdfium.bindings();
-            let page_handle = entry
-                .get_or_load_page(page, bindings)
-                .ok_or_else(|| anyhow!("Failed to load page {}", page))?;
-
-            let text_page = bindings.FPDFText_LoadPage(page_handle);
-            if text_page.is_null() {
-                return Err(anyhow!("FPDFText_LoadPage failed"));
-            }
-
-            let mut result = String::new();
-            for i in start as i32..=end as i32 {
-                let ch = bindings.FPDFText_GetUnicode(text_page, i);
-                result.push(std::char::from_u32(ch as u32).unwrap_or(' '));
-            }
-
-            bindings.FPDFText_ClosePage(text_page);
-            Ok(result)
-        }
-    }
-
-    fn handle_close(&mut self, id: String) {
-        if let Some(mut entry) = self.docs.remove(&id) {
-            let bindings = self.pdfium.bindings();
-            entry.cleanup(bindings);
-            println!("🗑️ 文档已关闭: {}", id);
-        }
-    }
-
-    fn cleanup_all_docs(&mut self) {
-        let bindings = self.pdfium.bindings();
-        for (id, mut entry) in self.docs.drain() {
-            entry.cleanup(bindings);
-            println!("🗑️ 清理文档: {}", id);
+            document.cleanup(bindings);
+            println!("🗑️ 文档资源已清理");
         }
     }
 }
 
-// 启动PDF工作线程的函数
-pub fn spawn_pdf_worker(library_path: String) -> Result<PdfWorkerHandle> {
-    let (tx, rx) = unbounded::<PdfCmd>();
+// PDF工作线程句柄
+#[derive(Clone)]
+pub struct PdfWorkerHandle {
+    tx: Sender<PdfCommand>,
+}
 
-    std::thread::spawn(move || match PdfWorker::new(library_path, rx) {
-        Ok(mut worker) => {
-            worker.run();
-        }
-        Err(e) => {
-            eprintln!("❌ PDF工作线程启动失败: {}", e);
+impl PdfWorkerHandle {
+    pub fn load_document(&self, file_path: String) -> Result<PdfDocumentMetadata, String> {
+        let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
+        self.tx.send(PdfCommand::LoadDocument { file_path, resp: resp_tx })
+            .map_err(|e| format!("Failed to send command: {}", e))?;
+        resp_rx.recv()
+            .map_err(|e| format!("Failed to receive response: {}", e))?
+    }
+
+    pub fn render_tiles_batch(&self, requests: Vec<TileRequest>) -> Result<Vec<TileRenderResult>, String> {
+        let (resp_tx, resp_rx) = crossbeam_channel::bounded(1);
+        self.tx.send(PdfCommand::RenderTilesBatch { requests, resp: resp_tx })
+            .map_err(|e| format!("Failed to send command: {}", e))?;
+        resp_rx.recv()
+            .map_err(|e| format!("Failed to receive response: {}", e))?
+    }
+}
+
+// 启动PDF工作线程
+pub fn spawn_pdf_worker(library_path: String) -> Result<PdfWorkerHandle, String> {
+    let (tx, rx) = unbounded::<PdfCommand>();
+    
+    std::thread::spawn(move || {
+        match PdfWorker::new(library_path, rx) {
+            Ok(mut worker) => {
+                worker.run();
+            }
+            Err(e) => {
+                eprintln!("❌ PDF工作线程启动失败: {}", e);
+            }
         }
     });
-
+    
     Ok(PdfWorkerHandle { tx })
 }

@@ -29,6 +29,32 @@ export interface TileInfo {
   ty: number;
 }
 
+// 新的瓦片请求结构，对应后端的TileRequest
+export interface TileRequest {
+  page_index: number;
+  rect_x: number;
+  rect_y: number;
+  rect_width: number;
+  rect_height: number;
+  scale_factor: number;
+  dpr: number;
+}
+
+// 批量瓦片渲染结果
+export interface BatchTileResult {
+  tiles: TileData[];
+  totalBytes: number;
+  tileCount: number;
+}
+
+// 单个瓦片数据
+export interface TileData {
+  data: Uint8Array;
+  width: number;
+  height: number;
+  key: string; // 瓦片缓存键
+}
+
 export interface ViewState {
   scale: number;
   scrollY: number;

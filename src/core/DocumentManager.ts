@@ -46,9 +46,10 @@ export class DocumentManager implements ReactPDF.DocumentManager {
   async openFromPath(path: string): Promise<PDFiumCore.DocumentHandle> {
     try {
       // 使用现有的 Tauri 命令
-      const metadata = await invoke<PdfMetadata>('open_pdf', { path });
-      
-      const handle: PDFiumCore.DocumentHandle = {
+                      const metadata = await invoke<PdfMetadata>('load_pdf', { filePath: path });
+        console.log('🔍 DocumentManager接收到元数据:', metadata);
+        
+        const handle: PDFiumCore.DocumentHandle = {
         id: metadata.id,
         handle: 0, // 暂时不需要底层handle
         metadata: {

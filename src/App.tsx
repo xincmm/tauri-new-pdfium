@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { PdfViewer } from './components/PdfViewer/PdfViewer';
 import { PdfViewerV2 } from './components/PdfViewer/PdfViewerV2';
+import { SimpleViewer } from './components/PdfViewer/SimpleViewer';
 import './App.css';
 
 function App() {
-  const [useV2, setUseV2] = useState(true); // 默认使用插件架构版本
+  const [viewerType, setViewerType] = useState<'v1' | 'v2' | 'simple'>('simple'); // 默认使用简单测试版本
 
   return (
     <div className="App">
@@ -18,20 +19,58 @@ function App() {
         color: 'white',
         padding: '8px 12px',
         borderRadius: '4px',
-        fontSize: '12px'
+        fontSize: '12px',
+        display: 'flex',
+        gap: '8px',
       }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={useV2}
-            onChange={(e) => setUseV2(e.target.checked)}
-          />
-          使用插件架构版本 {useV2 ? '(V2)' : '(V1)'}
-        </label>
+        <button 
+          onClick={() => setViewerType('simple')}
+          style={{
+            background: viewerType === 'simple' ? '#007acc' : 'transparent',
+            color: 'white',
+            border: '1px solid #555',
+            padding: '4px 8px',
+            borderRadius: '3px',
+            cursor: 'pointer',
+            fontSize: '11px',
+          }}
+        >
+          简单测试
+        </button>
+        <button 
+          onClick={() => setViewerType('v2')}
+          style={{
+            background: viewerType === 'v2' ? '#007acc' : 'transparent',
+            color: 'white',
+            border: '1px solid #555',
+            padding: '4px 8px',
+            borderRadius: '3px',
+            cursor: 'pointer',
+            fontSize: '11px',
+          }}
+        >
+          V2插件
+        </button>
+        <button 
+          onClick={() => setViewerType('v1')}
+          style={{
+            background: viewerType === 'v1' ? '#007acc' : 'transparent',
+            color: 'white',
+            border: '1px solid #555',
+            padding: '4px 8px',
+            borderRadius: '3px',
+            cursor: 'pointer',
+            fontSize: '11px',
+          }}
+        >
+          V1基础
+        </button>
       </div>
 
-      {/* 根据选择渲染不同版本 */}
-      {useV2 ? <PdfViewerV2 /> : <PdfViewer />}
+      {/* 渲染对应的版本 */}
+      {viewerType === 'simple' && <SimpleViewer />}
+      {viewerType === 'v2' && <PdfViewerV2 />}
+      {viewerType === 'v1' && <PdfViewer />}
     </div>
   );
 }
