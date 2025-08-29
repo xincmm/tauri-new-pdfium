@@ -79,7 +79,7 @@ export const SCROLL_DEBOUNCE_MS = 96; // 滚动停止后的延迟时间
 export const BUCKET_STRATEGY = {
   TARGET_FACTOR: 1.0,        // 目标桶倍数（1:1像素对齐）
   HIGHER_FACTOR: 1.2,        // 更清一档倍数（占位用）
-  LOWER_FACTOR: 0.6,         // 备用低清倍数
+  LOWER_FACTOR: 0.8,         // 备用低清倍数
   FADE_DELAY_MS: 140,        // 静止后淡入延迟时间
   FADE_DURATION_MS: 200,     // 淡入动画时长
 } as const;

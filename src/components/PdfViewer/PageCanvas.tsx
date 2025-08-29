@@ -79,6 +79,7 @@ interface PageCanvasProps {
   getScrollMetrics?: () => ScrollMetrics;
   isFocusPage?: boolean; // 是否为焦点页面
   globalTaskQueue?: PriorityTaskQueue; // 全局任务队列
+  isPreloadPage?: boolean; // 是否为预加载页面（不在当前视口中）
 }
 
 export const PageCanvas: React.FC<PageCanvasProps> = ({
@@ -94,6 +95,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
   getScrollMetrics,
   isFocusPage = false,
   globalTaskQueue,
+  isPreloadPage = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cacheCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -137,13 +139,9 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
       lastStillTime: Date.now(),
       needsFadeTransition: false,
     });
-    
-    // 触发reconcile - 缩放变化是主要的epoch推进时机
-    if (globalTaskQueue) {
-      const neededTasks = collectNeededTasks('scale-change');
-      globalTaskQueue.reconcile(neededTasks, 'scale-change');
-    }
   }, [viewState.scale]);
+
+  // 延迟添加当前页面需要的任务 - 配合全局reconcile机制 (将在其他变量声明后定义)
   
   const { 
     getTileState, 
@@ -414,7 +412,9 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
           
           const basePriority = bucket.isTarget ? 100 : 200;
           const distancePriority = Math.floor(Math.abs((tileY + renderHeight/2) - pageHeight/2) / 10);
-          const finalPriority = basePriority + distancePriority + (isFocusPage ? -1000 : 0);
+          const focusPriority = isFocusPage ? -1000 : 0;
+          const preloadPenalty = isPreloadPage ? 1000 : 0; // 预加载页面优先级更低
+          const finalPriority = basePriority + distancePriority + focusPriority + preloadPenalty;
           
           neededTasks.push({
             id: tileKey,
@@ -453,6 +453,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     viewState.scale,
     isScrolling,
     isFocusPage,
+    isPreloadPage,
     pageWidth,
     pageHeight,
     pageIndex,
@@ -467,6 +468,65 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     bitmapCacheRef,
     inflightRef
   ]);
+
+  // 智能任务添加 - 支持滚动预加载 + epoch机制
+  useEffect(() => {
+    if (!globalTaskQueue) return;
+    
+    const addPageTasks = () => {
+      const reason = isScrolling ? 'scrolling-preload' : 'scroll-stopped';
+      const neededTasks = collectNeededTasks(reason);
+      
+             // 滚动中的预加载策略：降低优先级，减少数量
+       if (isScrolling) {
+         // 预加载页面在快速滚动时完全跳过
+         if (isPreloadPage) {
+           const scrollMetrics = getScrollMetrics?.();
+           const isSlowScroll = scrollMetrics && Math.abs(scrollMetrics.velocity.vy) < 1;
+           if (!isSlowScroll) {
+             return; // 快速滚动时跳过所有预加载页面
+           }
+         }
+         
+         // 只为焦点页面和临近可见页面预加载
+         const scrollMetrics = getScrollMetrics?.();
+         const isNearVisible = scrollMetrics && Math.abs(scrollMetrics.velocity.vy) < 2; // 慢速滚动
+         
+         if (!isFocusPage && !isNearVisible && !isPreloadPage) {
+           return; // 快速滚动时跳过非焦点页面
+         }
+         
+         // 降低滚动中任务的优先级
+         neededTasks.forEach(task => {
+           task.priority += 500; // 滚动预加载优先级较低
+           if (isPreloadPage) {
+             task.priority += 300; // 预加载页面额外降低优先级
+           }
+         });
+       }
+      
+      for (const task of neededTasks) {
+        globalTaskQueue.addTask({
+          ...task,
+          epoch: globalTaskQueue.getCurrentEpoch()
+        });
+      }
+      
+      if (neededTasks.length > 0) {
+        console.log(`📋 页面${pageIndex + 1}添加任务 (${reason}): ${neededTasks.length}个`);
+      }
+    };
+
+    if (isScrolling) {
+      // 滚动中立即添加预加载任务
+      const timeoutId = setTimeout(addPageTasks, 50);
+      return () => clearTimeout(timeoutId);
+    } else {
+      // 滚动停止后，延迟添加高优先级任务
+      const timeoutId = setTimeout(addPageTasks, 200);
+      return () => clearTimeout(timeoutId);
+    }
+     }, [isScrolling, collectNeededTasks, pageIndex, globalTaskQueue, isFocusPage, isPreloadPage, getScrollMetrics]);
 
   // 重建静态背景
   const rebuildStaticBackground = useCallback(() => {
@@ -805,6 +865,11 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
         ...(isFocusPage && {
           zIndex: 1,
           opacity: 1,
+        }),
+        // 预加载页面优化：减少渲染开销
+        ...(isPreloadPage && {
+          opacity: 0.98, // 轻微透明度，优化GPU合成
+          transform: 'translateZ(0)', // 启用硬件加速
         }),
       }}
     />

@@ -5,23 +5,15 @@ import {
   PdfMetadata, 
   ViewState, 
   PageLayout, 
-  TileInfo,
-  TILE_SIZE,
   PageTextLayout
 } from '../../types/pdf';
 import { usePdfState } from '../../hooks/usePdfState';
 import { getVisiblePages, getExpandedVisiblePages } from '../../utils/pdfLayout';
-import { 
-  getTileUrl
-} from '../../utils/tileUtils';
-import {
-  generateRenderBuckets,
-  generateBucketTileKey
-} from '../../utils/bucketUtils';
+// 移除未使用的import
 import { PdfTextLayer } from './PdfTextLayer';
 import { PageCanvas } from './PageCanvas';
 import { ScrollMetrics } from './hooks/useScrollHandler';
-import { LoadTask, PriorityTaskQueue } from '../../utils/taskQueue';
+import { PriorityTaskQueue } from '../../utils/taskQueue';
 import { performanceMonitor } from '../../utils/performanceMonitor';
 
 interface PdfContentProps {
@@ -172,144 +164,48 @@ export const PdfContent: React.FC<PdfContentProps> = ({
     }
   }, [isScrolling, getScrollMetrics, detectFocusPage, focusPageIndex]);
 
-  // 预加载扩展可见页面的瓦片
+  // 全局reconcile机制 - 统一管理所有页面的任务需求
   useEffect(() => {
-    if (isScrolling) return; // 滚动时不进行预加载
-
-    const preloadTiles = () => {
-      expandedVisiblePages.forEach(pageLayout => {
-        const { pageIndex } = pageLayout;
-        const [pageWidthPt, pageHeightPt] = pdfMetadata.page_dims[pageIndex];
-        const baseDpi = 96.0;
-        const scale = viewState.scale;
-        const effectiveDpi = baseDpi * scale;
-        
-        const wPx = Math.ceil((pageWidthPt / 72.0) * effectiveDpi);
-        const hPx = Math.ceil((pageHeightPt / 72.0) * effectiveDpi);
-        
-        const dpiScale = effectiveDpi / baseDpi;
-        const backendTileSize = Math.round(TILE_SIZE * dpiScale);
-        
-        const endTileX = Math.ceil(wPx / backendTileSize);
-        const endTileY = Math.ceil(hPx / backendTileSize);
-
-        // 使用新的桶策略进行预加载
-        const buckets = generateRenderBuckets(viewState.scale);
-        
-        for (let tx = 0; tx < endTileX; tx++) {
-          for (let ty = 0; ty < endTileY; ty++) {
-            // 为所有桶预加载瓦片，优先加载低清桶
-            for (const bucket of buckets.reverse()) { // reverse让低清桶优先
-              const tileKey = generateBucketTileKey(bucket, {
-                id: pdfMetadata.id,
-                page: pageIndex,
-                tx,
-                ty,
-              });
-              
-              const tileState = pdfState.getTileState(tileKey);
-              
-              if (!tileState.loading && !bitmapCacheRef.current.has(tileKey)) {
-                const tileInfo: TileInfo = {
-                  id: pdfMetadata.id,
-                  page: pageIndex,
-                  scale: Math.round(bucket.scale * 100) / 100,
-                  tx,
-                  ty,
-                };
-                
-                const tileUrl = getTileUrl(tileInfo, devicePixelRatio, bucket.isTarget);
-                
-                pdfState.updateTileState(tileKey, { loading: true });
-                
-                // 使用优先级任务队列
-                const task: LoadTask = {
-                  id: tileKey,
-                  priority: bucket.isTarget ? 100 : 200, // 目标桶优先级更高
-                  pageIndex,
-                  epoch: globalTaskQueue.getCurrentEpoch(), // 使用当前epoch
-                  execute: async () => {
-                    try {
-                      const fetchStart = performance.now();
-                      const response = await fetch(tileUrl, { cache: 'force-cache' });
-                      const fetchEnd = performance.now();
-                      
-                      const blobStart = performance.now();
-                      const blob = await response.blob();
-                      const blobEnd = performance.now();
-                      
-                      const bitmapStart = performance.now();
-                      const bitmap = await createImageBitmap(blob);
-                      const bitmapEnd = performance.now();
-                      
-                      // 解析Server-Timing头
-                      const serverTiming = response.headers.get('Server-Timing');
-                      
-                      // 记录预加载性能统计
-                      const networkTime = fetchEnd - fetchStart;
-                      const blobTime = blobEnd - blobStart;
-                      const bitmapTime = bitmapEnd - bitmapStart;
-                      const totalFrontendTime = bitmapEnd - fetchStart;
-                      
-                      // 解析并显示详细的服务端时间
-                      const pixelHeader = response.headers.get('X-Pixels');
-                      const serverTimingParsed = performanceMonitor.parseServerTiming(serverTiming);
-                      const pixelInfo = performanceMonitor.parsePixelInfo(pixelHeader);
-                      
-                      let detailedServerStats = '';
-                      if (serverTimingParsed) {
-                        detailedServerStats = `
-                        🔧 服务端详情: 队列=${serverTimingParsed.queue.toFixed(1)}ms | 设置=${serverTimingParsed.setup.toFixed(1)}ms | 光栅=${serverTimingParsed.raster.toFixed(1)}ms | 打包=${serverTimingParsed.pack.toFixed(1)}ms | 编码=${serverTimingParsed.encode.toFixed(1)}ms | 总计=${serverTimingParsed.total.toFixed(1)}ms`;
-                        if (pixelInfo) {
-                          const megapixels = (pixelInfo.width * pixelInfo.height) / 1_000_000;
-                          detailedServerStats += ` | 像素=${pixelInfo.width}x${pixelInfo.height}(${megapixels.toFixed(2)}MP)`;
-                        }
-                      }
-                      
-                      console.log(`📦 预加载性能 [${tileKey}]: 
-                        网络: ${networkTime.toFixed(1)}ms 
-                        | Blob: ${blobTime.toFixed(1)}ms 
-                        | Bitmap: ${bitmapTime.toFixed(1)}ms 
-                        | 前端总计: ${totalFrontendTime.toFixed(1)}ms${detailedServerStats}`);
-                      
-                      // 记录到性能监控器
-                      performanceMonitor.recordTileLoad({
-                        tileKey,
-                        networkTime,
-                        blobTime,
-                        bitmapTime,
-                        totalFrontendTime,
-                        serverTiming: serverTimingParsed,
-                        pixelInfo: pixelInfo,
-                        timestamp: Date.now(),
-                        isPreload: true
-                      });
-                      
-                      bitmapCacheRef.current.set(tileKey, bitmap);
-                      pdfState.updateTileState(tileKey, { loaded: true, loading: false });
-                    } catch (error) {
-                      console.warn(`Failed to preload ${bucket.key} tile:`, tileInfo);
-                      pdfState.updateTileState(tileKey, { loading: false });
-                    }
-                  },
-                  cancel: () => {
-                    pdfState.updateTileState(tileKey, { loading: false });
-                    inflightRef.current.delete(tileKey);
-                  }
-                };
-                
-                globalTaskQueue.addTask(task);
-              }
-            }
-          }
-        }
-      });
+    // 收集所有扩展可见页面的任务需求并进行全局reconcile
+    const triggerGlobalReconcile = (reason: string) => {
+      const allNeededTasks: any[] = [];
+      
+      // 为所有扩展可见页面收集任务（恢复预加载功能）
+      // 注意：实际任务收集由各个PageCanvas自己完成
+      
+      console.log(`🔄 全局任务对账 (${reason}): 管理${expandedVisiblePages.length}个扩展页面`);
+      globalTaskQueue.reconcile(allNeededTasks, reason); // 清空所有旧任务，开始新轮次
     };
 
-    // 使用 setTimeout 进行预加载，避免阻塞主线程
-    const timeoutId = setTimeout(preloadTiles, 100);
-    return () => clearTimeout(timeoutId);
-  }, [expandedVisiblePages, viewState.scale, pdfMetadata, devicePixelRatio, isScrolling, bitmapCacheRef, pdfState]);
+    // 关键时机触发reconcile
+    if (!isScrolling) {
+      // 滚动停止后触发完整reconcile
+      const timeoutId = setTimeout(() => {
+        triggerGlobalReconcile('scroll-stopped');
+      }, 100);
+      return () => clearTimeout(timeoutId);
+    } else {
+      // 滚动过程中的轻量reconcile - 清理过远的任务但保持预加载
+      const timeoutId = setTimeout(() => {
+        triggerGlobalReconcile('scrolling-preload');
+      }, 500); // 滚动中较少频次的清理
+      return () => clearTimeout(timeoutId);
+    }
+  }, [isScrolling, expandedVisiblePages, viewState.scale]);
+
+  // 缩放变化时立即触发全局reconcile
+  useEffect(() => {
+    console.log('🔄 缩放变化，触发全局任务对账');
+    globalTaskQueue.reconcile([], 'scale-change'); // 清空所有任务，重新开始
+  }, [viewState.scale]);
+
+  // 焦点页面变化时重新设置优先级
+  useEffect(() => {
+    if (focusPageIndex !== null) {
+      console.log(`🎯 焦点页面变化: ${focusPageIndex + 1}`);
+      globalTaskQueue.setFocusPage(focusPageIndex);
+    }
+  }, [focusPageIndex]);
 
   // 跨页选区处理函数
   const handleGlobalMouseDown = useCallback(() => {
@@ -523,25 +419,31 @@ export const PdfContent: React.FC<PdfContentProps> = ({
         boxSizing: 'border-box',
       }}
     >
-      {/* Canvas 渲染层 - 只渲染可见页面 */}
-      {visiblePages.map(pageLayout => (
-        <PageCanvas
-          key={pageLayout.pageIndex}
-          pageLayout={pageLayout}
-          pdfMetadata={pdfMetadata}
-          containerWidth={contentWidth}
-          viewState={viewState}
-          lastScrollY={lastScrollY}
-          isScrolling={isScrolling}
-          devicePixelRatio={devicePixelRatio}
-          bitmapCacheRef={bitmapCacheRef}
-          inflightRef={inflightRef}
-          pdfState={pdfState}
-          getScrollMetrics={getScrollMetrics}
-          isFocusPage={focusPageIndex === pageLayout.pageIndex}
-          globalTaskQueue={globalTaskQueue}
-        />
-      ))}
+      {/* Canvas 渲染层 - 渲染扩展可见页面（包含预加载） */}
+      {expandedVisiblePages.map(pageLayout => {
+        const isActuallyVisible = visiblePages.some(vp => vp.pageIndex === pageLayout.pageIndex);
+        const isPreloadPage = !isActuallyVisible;
+        
+        return (
+          <PageCanvas
+            key={pageLayout.pageIndex}
+            pageLayout={pageLayout}
+            pdfMetadata={pdfMetadata}
+            containerWidth={contentWidth}
+            viewState={viewState}
+            lastScrollY={lastScrollY}
+            isScrolling={isScrolling}
+            devicePixelRatio={devicePixelRatio}
+            bitmapCacheRef={bitmapCacheRef}
+            inflightRef={inflightRef}
+            pdfState={pdfState}
+            getScrollMetrics={getScrollMetrics}
+            isFocusPage={focusPageIndex === pageLayout.pageIndex}
+            globalTaskQueue={globalTaskQueue}
+            isPreloadPage={isPreloadPage} // 新增：标识预加载页面
+          />
+        );
+      })}
       
       {/* 文本选择层 */}
       {visiblePages.map(pageLayout => {
