@@ -15,6 +15,7 @@ interface SimplePageProps {
     scale: number;
   };
   isVisible: boolean;
+  shouldRender?: boolean;
 }
 
 export const SimplePage: React.FC<SimplePageProps> = ({
@@ -23,6 +24,7 @@ export const SimplePage: React.FC<SimplePageProps> = ({
   pageLayout,
   viewState,
   isVisible,
+  shouldRender = true,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [tiles, setTiles] = useState<Map<string, ImageBitmap>>(new Map());
@@ -48,7 +50,7 @@ export const SimplePage: React.FC<SimplePageProps> = ({
 
   // 渲染所有瓦片
   const renderAllTiles = useCallback(async () => {
-    if (!isVisible || isLoading) return;
+    if (!isVisible || !shouldRender || isLoading) return;
     
     console.log(`🚀 开始渲染页面${pageIndex + 1}的所有瓦片...`);
     setIsLoading(true);
@@ -98,7 +100,7 @@ export const SimplePage: React.FC<SimplePageProps> = ({
     } finally {
       setIsLoading(false);
     }
-  }, [pdfMetadata.id, pageIndex, scale, devicePixelRatio, tilesX, tilesY, pageWidth, pageHeight, isVisible, isLoading]);
+  }, [pdfMetadata.id, pageIndex, scale, devicePixelRatio, tilesX, tilesY, pageWidth, pageHeight, isVisible, isLoading, shouldRender]);
 
   // 绘制到canvas
   const drawToCanvas = useCallback(() => {
@@ -150,10 +152,15 @@ export const SimplePage: React.FC<SimplePageProps> = ({
 
   // 当页面可见时开始渲染
   useEffect(() => {
-    if (isVisible && tiles.size === 0 && !isLoading) {
+    if (isVisible && shouldRender && tiles.size === 0 && !isLoading) {
       renderAllTiles();
     }
-  }, [isVisible, tiles.size, isLoading, renderAllTiles]);
+  }, [isVisible, shouldRender, tiles.size, isLoading, renderAllTiles]);
+
+  // 当缩放变化时清空旧瓦片，等待空闲后再渲染
+  useEffect(() => {
+    setTiles(new Map());
+  }, [scale]);
 
   // 当瓦片更新时重新绘制
   useEffect(() => {

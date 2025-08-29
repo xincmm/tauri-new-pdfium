@@ -1,22 +1,61 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { SimplePage } from './SimplePage';
 import { PdfMetadata } from '../../types/pdf';
-import { calculatePageLayouts } from '../../utils/pdfLayout';
+import { calculatePageLayouts, getExpandedVisiblePages, getVisiblePages } from '../../utils/pdfLayout';
+import { PRELOAD_PAGES_AHEAD, SCROLL_DEBOUNCE_MS } from '../../types/pdf';
 
 export const SimpleViewer: React.FC = () => {
   const [pdfMetadata, setPdfMetadata] = useState<PdfMetadata | null>(null);
   const [viewState, setViewState] = useState({
-    scale: 1.0,
+    scale: 1.6,
     scrollY: 0,
   });
+  const lastScrollYRef = useRef(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerHeight, setContainerHeight] = useState<number>(0);
+  const [isScrollIdle, setIsScrollIdle] = useState<boolean>(true);
+  const idleTimerRef = useRef<number | null>(null);
+  const [hasInteracted, setHasInteracted] = useState<boolean>(false);
+
+  // 监听容器高度变化
+  useEffect(() => {
+    const updateHeight = () => {
+      const h = containerRef.current?.clientHeight ?? window.innerHeight;
+      setContainerHeight(h);
+    };
+    updateHeight();
+    window.addEventListener('resize', updateHeight);
+    return () => window.removeEventListener('resize', updateHeight);
+  }, []);
 
   // 计算页面布局
   const pageLayouts = useMemo(() => {
     if (!pdfMetadata) return [];
     return calculatePageLayouts(pdfMetadata, viewState);
   }, [pdfMetadata, viewState]);
+
+  // 计算可见页面：初次打开仅渲染首屏；交互后再扩展预加载窗口
+  const visibleLayouts = useMemo(() => {
+    if (!pdfMetadata) return [];
+    if (!hasInteracted) {
+      return getVisiblePages(
+        pageLayouts,
+        containerHeight,
+        viewState.scrollY
+      );
+    }
+    return getExpandedVisiblePages(
+      pageLayouts,
+      containerHeight,
+      viewState.scrollY,
+      lastScrollYRef.current,
+      PRELOAD_PAGES_AHEAD
+    );
+  }, [pdfMetadata, pageLayouts, containerHeight, viewState.scrollY, hasInteracted]);
+
+  const visiblePageSet = useMemo(() => new Set(visibleLayouts.map(l => l.pageIndex)), [visibleLayouts]);
 
   const totalHeight = pageLayouts.length > 0 
     ? pageLayouts[pageLayouts.length - 1].y + pageLayouts[pageLayouts.length - 1].height + 50 
@@ -45,6 +84,7 @@ export const SimpleViewer: React.FC = () => {
 
   // 缩放控制
   const handleZoom = (delta: number) => {
+    setHasInteracted(true);
     setViewState(prev => ({
       ...prev,
       scale: Math.max(0.25, Math.min(4.0, prev.scale + delta)),
@@ -55,10 +95,21 @@ export const SimpleViewer: React.FC = () => {
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
     if (target) {
+      setHasInteracted(true);
+      // 记录上一次滚动位置
+      lastScrollYRef.current = viewState.scrollY;
       setViewState(prev => ({
         ...prev,
         scrollY: target.scrollTop,
       }));
+      // 标记为滚动中，并启动/重启防抖定时器
+      setIsScrollIdle(false);
+      if (idleTimerRef.current) {
+        window.clearTimeout(idleTimerRef.current);
+      }
+      idleTimerRef.current = window.setTimeout(() => {
+        setIsScrollIdle(true);
+      }, SCROLL_DEBOUNCE_MS);
     }
   };
 
@@ -120,6 +171,7 @@ export const SimpleViewer: React.FC = () => {
           justifyContent: 'center',
         }}
         onScroll={handleScroll}
+        ref={containerRef}
       >
         {pdfMetadata && pageLayouts.length > 0 && (
           <div
@@ -147,7 +199,8 @@ export const SimpleViewer: React.FC = () => {
                   pageIndex={layout.pageIndex}
                   pageLayout={layout}
                   viewState={viewState}
-                  isVisible={true} // 简单起见，先让所有页面都可见
+                  isVisible={visiblePageSet.has(layout.pageIndex)}
+                  shouldRender={isScrollIdle && visiblePageSet.has(layout.pageIndex)}
                 />
               </div>
             ))}
