@@ -187,26 +187,49 @@ pub fn run() {
                 );
             }
 
+            // 测试端点：返回固定64KB数据用于性能对比
+            if path.starts_with("/test-64kb") {
+                let test_data = vec![0u8; 65536]; // 64KB of zeros
+                let server_timing = "test;dur=1.0, total;dur=1.0";
+                
+                return responder.respond(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "application/octet-stream")
+                        .header(header::CONTENT_LENGTH, "65536")
+                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, &origin)
+                        .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, OPTIONS")
+                        .header(header::ACCESS_CONTROL_ALLOW_HEADERS, "*")
+                        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+                        .header("Timing-Allow-Origin", "*")
+                        .header("Server-Timing", server_timing)
+                        .body(test_data)
+                        .unwrap(),
+                );
+            }
+
             // 异步处理瓦片请求
             tauri::async_runtime::spawn(async move {
                 let response = match handle_tile_request(&path, &app).await {
                     Ok((bytes, stats, queue_ms)) => {
                         let write_start = Instant::now();
                         
-                        // 构建详细的Server-Timing头，包含队列等待时间
+                        // 像素信息头
+                        let pixel_info = format!("{}x{}", stats.pixel_width, stats.pixel_height);
+                        let content_length = bytes.len().to_string();
+                        let write_ms = write_start.elapsed().as_secs_f64() * 1000.0;
+                        
+                        // 构建详细的Server-Timing头，包含队列等待时间和写出时间
                         let server_timing = format!(
-                            "queue;dur={:.2}, setup;dur={:.2}, raster;dur={:.2}, pack;dur={:.2}, encode;dur={:.2}, total;dur={:.2}",
+                            "queue;dur={:.2}, setup;dur={:.2}, raster;dur={:.2}, pack;dur={:.2}, encode;dur={:.2}, write;dur={:.2}, total;dur={:.2}",
                             queue_ms,
                             stats.setup_ms,
                             stats.raster_ms,
                             stats.pack_ms,
                             stats.encode_ms,
+                            write_ms,
                             stats.total_time.as_secs_f64() * 1000.0
                         );
-                        
-                        // 像素信息头
-                        let pixel_info = format!("{}x{}", stats.pixel_width, stats.pixel_height);
-                        let content_length = bytes.len().to_string();
                         
                         // 构建响应 - 确保一次性完整传输
                         let response = Response::builder()

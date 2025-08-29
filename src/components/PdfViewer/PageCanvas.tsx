@@ -26,6 +26,7 @@ import {
 import { ScrollMetrics } from './hooks/useScrollHandler';
 import { LoadTask, PriorityTaskQueue } from '../../utils/taskQueue';
 import { performanceMonitor } from '../../utils/performanceMonitor';
+import { WorkerTileLoader, TileLoadResult } from '../../utils/workerTileLoader';
 
 // 瓦片几何信息缓存接口
 interface TileGeometry {
@@ -37,24 +38,29 @@ interface TileGeometry {
   renderHeight: number;
 }
 
-// 瓦片加载并发控制（保留原有的简单队列作为备用）
-const MAX_CONCURRENCY = 32;
-const loadQueue: Array<() => Promise<void>> = [];
-let runningTasks = 0;
+// 全局Worker加载器实例 - 降低并发数
+let globalWorkerLoader: WorkerTileLoader | null = null;
 
-function scheduleLoad(task: () => Promise<void>) {
-  loadQueue.push(task);
-  pumpQueue();
+function getWorkerLoader(): WorkerTileLoader {
+  if (!globalWorkerLoader) {
+    globalWorkerLoader = new WorkerTileLoader({
+      maxConcurrency: 12,
+      workerPath: '/workers/tile-loader-worker.js'
+    });
+    
+    // 添加性能测试
+    setTimeout(() => {
+      globalWorkerLoader?.testFetchPerformance('tiles://test-64kb');
+    }, 1000);
+  }
+  return globalWorkerLoader;
 }
 
-function pumpQueue() {
-  while (runningTasks < MAX_CONCURRENCY && loadQueue.length > 0) {
-    const task = loadQueue.shift()!;
-    runningTasks++;
-    task().finally(() => {
-      runningTasks--;
-      pumpQueue();
-    });
+// 清理函数
+export function cleanupWorkerLoader() {
+  if (globalWorkerLoader) {
+    globalWorkerLoader.destroy();
+    globalWorkerLoader = null;
   }
 }
 
@@ -158,8 +164,8 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     });
   }, []);
 
-  // 加载 ImageBitmap
-  const loadBitmap = useCallback(async (url: string, key: string): Promise<ImageBitmap | null> => {
+  // 使用Worker加载 ImageBitmap - 避免主线程阻塞
+  const loadBitmapWithWorker = useCallback(async (url: string, key: string, priority: number = 100): Promise<ImageBitmap | null> => {
     if (bitmapCacheRef.current.has(key)) {
       return bitmapCacheRef.current.get(key)!;
     }
@@ -171,64 +177,48 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     inflightRef.current.add(key);
     
     try {
-      const fetchStart = performance.now();
-      const response = await fetch(url, { cache: 'force-cache' });
-      const fetchEnd = performance.now();
+      const workerLoader = getWorkerLoader();
+      const result: TileLoadResult = await workerLoader.loadTile(key, url, priority);
       
-      const blobStart = performance.now();
-      const blob = await response.blob();
-      const blobEnd = performance.now();
+      const { imageBitmap, performance: perfData } = result;
       
-      const bitmapStart = performance.now();
-      const bitmap = await createImageBitmap(blob);
-      const bitmapEnd = performance.now();
-      
-      // 记录详细的性能统计
-      const networkTime = fetchEnd - fetchStart;
-      const blobTime = blobEnd - blobStart;
-      const bitmapTime = bitmapEnd - bitmapStart;
-      const totalFrontendTime = bitmapEnd - fetchStart;
-      
-      // 解析并显示详细的服务端时间
-      const serverTimingHeader = response.headers.get('Server-Timing');
-      const pixelHeader = response.headers.get('X-Pixels');
-      const serverTiming = performanceMonitor.parseServerTiming(serverTimingHeader);
-      const pixelInfo = performanceMonitor.parsePixelInfo(pixelHeader);
-      
+      // 构建详细的性能日志
       let detailedServerStats = '';
-      if (serverTiming) {
+      if (perfData.serverTiming) {
+        const st = perfData.serverTiming;
         detailedServerStats = `
-        🔧 服务端详情: 队列=${serverTiming.queue.toFixed(1)}ms | 设置=${serverTiming.setup.toFixed(1)}ms | 光栅=${serverTiming.raster.toFixed(1)}ms | 打包=${serverTiming.pack.toFixed(1)}ms | 编码=${serverTiming.encode.toFixed(1)}ms | 总计=${serverTiming.total.toFixed(1)}ms`;
-        if (pixelInfo) {
-          const megapixels = (pixelInfo.width * pixelInfo.height) / 1_000_000;
-          detailedServerStats += ` | 像素=${pixelInfo.width}x${pixelInfo.height}(${megapixels.toFixed(2)}MP)`;
+        🔧 服务端详情: 队列=${(st.queue || 0).toFixed(1)}ms | 设置=${(st.setup || 0).toFixed(1)}ms | 光栅=${(st.raster || 0).toFixed(1)}ms | 打包=${(st.pack || 0).toFixed(1)}ms | 编码=${(st.encode || 0).toFixed(1)}ms | 写出=${(st.write || 0).toFixed(1)}ms | 总计=${(st.total || 0).toFixed(1)}ms`;
+        if (perfData.pixelInfo) {
+          const megapixels = (perfData.pixelInfo.width * perfData.pixelInfo.height) / 1_000_000;
+          detailedServerStats += ` | 像素=${perfData.pixelInfo.width}x${perfData.pixelInfo.height}(${megapixels.toFixed(2)}MP)`;
         }
       }
       
-      console.log(`🎯 瓦片加载性能 [${key}]: 
-        网络请求: ${networkTime.toFixed(1)}ms 
-        | Blob转换: ${blobTime.toFixed(1)}ms 
-        | ImageBitmap: ${bitmapTime.toFixed(1)}ms 
-        | 总计前端: ${totalFrontendTime.toFixed(1)}ms${detailedServerStats}`);
+      console.log(`🚀 Worker瓦片加载 [${key}]: 
+        网络请求: ${perfData.fetchTime.toFixed(1)}ms 
+        | 解码时间: ${perfData.decodeTime.toFixed(1)}ms 
+        | Worker总计: ${perfData.totalTime.toFixed(1)}ms 
+        | 数据大小: ${(perfData.size / 1024).toFixed(1)}KB${detailedServerStats}
+        ⚡ 主线程阻塞已避免 - 网络和解码在Worker中完成`);
       
       // 记录到性能监控器
       performanceMonitor.recordTileLoad({
         tileKey: key,
-        networkTime,
-        blobTime,
-        bitmapTime,
-        totalFrontendTime,
-        serverTiming: serverTiming,
-        pixelInfo: pixelInfo,
+        networkTime: perfData.fetchTime,
+        blobTime: 0, // Worker中没有单独的blob时间
+        bitmapTime: perfData.decodeTime,
+        totalFrontendTime: perfData.totalTime,
+        serverTiming: perfData.serverTiming,
+        pixelInfo: perfData.pixelInfo,
         timestamp: Date.now(),
         isPreload: false
       });
       
-      bitmapCacheRef.current.set(key, bitmap);
+      bitmapCacheRef.current.set(key, imageBitmap);
       requestRedraw(); // 触发重绘
-      return bitmap;
+      return imageBitmap;
     } catch (error) {
-      console.warn('Failed to load bitmap:', key, error);
+      console.warn('Failed to load bitmap with worker:', key, error);
       return null;
     } finally {
       inflightRef.current.delete(key);
@@ -415,7 +405,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     ctx.restore();
   }, [pageWidth, pageHeight, pageIndex, devicePixelRatio, getStaticBackgroundCanvas]);
 
-  // 绘制瓦片到缓存canvas
+  // 绘制瓦片到缓存canvas - 优化的ImageBitmap渲染
   const paintTile = useCallback((
     cacheCtx: CanvasRenderingContext2D,
     bitmap: ImageBitmap,
@@ -424,7 +414,11 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     renderWidth: number,
     renderHeight: number
   ) => {
+    // 使用最快的ImageBitmap渲染方式
     cacheCtx.imageSmoothingEnabled = false;
+    cacheCtx.globalCompositeOperation = 'source-over';
+    
+    // 直接绘制ImageBitmap，这是最快的方式
     cacheCtx.drawImage(
       bitmap,
       (tileX + 2) * devicePixelRatio,
@@ -439,7 +433,11 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    const ctx = canvas.getContext('2d', { 
+      alpha: false, 
+      desynchronized: true,
+      willReadFrequently: false // 优化写入性能
+    });
     if (!ctx) return;
 
     const actualWidth = (pageWidth + 4) * devicePixelRatio;
@@ -476,7 +474,15 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     if (isScrolling && cacheCanvas.width > 0 && !needsFullRender()) {
       // 如果当前页面已经有可用的桶，滚动时直接使用缓存
       if (pageRenderState.activeBucket) {
-        ctx.clearRect(0, 0, actualWidth, actualHeight);
+        // 立即绘制页面白色背景
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, actualWidth, actualHeight);
+        
+        // 添加页面边框
+        ctx.strokeStyle = '#e0e0e0';
+        ctx.lineWidth = 1 * devicePixelRatio;
+        ctx.strokeRect(0.5 * devicePixelRatio, 0.5 * devicePixelRatio, actualWidth - devicePixelRatio, actualHeight - devicePixelRatio);
+        
         ctx.drawImage(cacheCanvas, 0, 0);
         return;
       }
@@ -489,7 +495,10 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
       rebuildStaticBackground(); // 重建静态背景
     }
     
-    const cacheCtx = cacheCanvas.getContext('2d', { alpha: false });
+    const cacheCtx = cacheCanvas.getContext('2d', { 
+      alpha: false,
+      willReadFrequently: false // 优化写入性能
+    });
     if (!cacheCtx) return;
 
     // 确保静态背景存在
@@ -547,14 +556,32 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
       }));
     }
     
-    // 如果没有可用的桶，保持当前缓存内容
+    // 如果没有可用的桶，绘制白色背景并保持当前缓存内容
     if (!activeBucket) {
+      // 立即绘制页面白色背景 - 确保即使没有瓦片也能看到页面轮廓
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, actualWidth, actualHeight);
+      
+      // 添加页面边框
+      ctx.strokeStyle = '#e0e0e0';
+      ctx.lineWidth = 1 * devicePixelRatio;
+      ctx.strokeRect(0.5 * devicePixelRatio, 0.5 * devicePixelRatio, actualWidth - devicePixelRatio, actualHeight - devicePixelRatio);
+      
       if (cacheCanvas.width > 0 && cacheCanvas.height > 0) {
         ctx.drawImage(cacheCanvas, 0, 0);
       }
       return;
     }
     
+    // 立即绘制页面白色背景到主canvas - 解决快速滚动时的白屏问题
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, actualWidth, actualHeight);
+    
+    // 添加页面边框以更清楚地显示页面边界
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 1 * devicePixelRatio;
+    ctx.strokeRect(0.5 * devicePixelRatio, 0.5 * devicePixelRatio, actualWidth - devicePixelRatio, actualHeight - devicePixelRatio);
+
     // 调试信息
     if (isFocusPage) {
       console.log(`焦点页面 ${pageIndex + 1} 桶策略: 活动桶=${activeBucket.key}(${activeBucket.scale.toFixed(2)}), 可用桶=${availableBuckets.length}, 静止=${isCurrentlyStill}`);
@@ -591,6 +618,9 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     // 第二道保险：基于overscan的优化加载策略
     const scrollMetrics = getScrollMetrics?.();
     const overscanConfig = scrollMetrics?.overscan || { extraCols: 1, extraRows: 1 };
+    
+    // 收集当前需要的瓦片ID，用于取消远处的请求
+    const currentNeededTiles = new Set<string>();
     
     // 后台加载策略：为所有桶加载瓦片（带overscan优化）
     for (const bucket of allBuckets) {
@@ -635,6 +665,11 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
           ty,
         });
         
+        // 添加到当前需要的瓦片集合
+        if (isInOverscan || isFocusPage || bucket === activeBucket) {
+          currentNeededTiles.add(tileKey);
+        }
+        
         const tileState = getTileState(tileKey);
         const bitmap = bitmapCacheRef.current.get(tileKey);
         
@@ -664,7 +699,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
               pageIndex,
               execute: async () => {
                 try {
-                  await loadBitmap(tileUrl, tileKey);
+                  await loadBitmapWithWorker(tileUrl, tileKey, finalPriority);
                   updateTileState(tileKey, { loaded: true, loading: false });
                   
                   // 检查是否该桶的整页瓦片都已完成
@@ -686,10 +721,13 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
             
             globalTaskQueue.addTask(task);
           } else {
-            // 回退到简单队列
-            scheduleLoad(async () => {
-              try {
-                await loadBitmap(tileUrl, tileKey);
+            // 回退到Worker加载器
+            const basePriority = bucket.isTarget ? 100 : 200;
+            const distancePriority = Math.floor(Math.abs((tileY + renderHeight/2) - pageHeight/2) / 10);
+            const finalPriority = basePriority + distancePriority + (isFocusPage ? -1000 : 0);
+            
+            loadBitmapWithWorker(tileUrl, tileKey, finalPriority)
+              .then(() => {
                 updateTileState(tileKey, { loaded: true, loading: false });
                 
                 // 检查是否该桶的整页瓦片都已完成
@@ -698,14 +736,20 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
                     requestRedraw();
                   }
                 }, 0);
-              } catch (error) {
+              })
+              .catch((error) => {
                 console.warn(`Failed to load ${bucket.key} tile:`, tileInfo);
                 updateTileState(tileKey, { loading: false });
-              }
-            });
+              });
           }
         }
       }
+    }
+
+    // 取消远处的任务以减少并发压力
+    if (isScrolling && scrollMetrics && Math.abs(scrollMetrics.velocity.vy) > 0.5) {
+      const workerLoader = getWorkerLoader();
+      workerLoader.cancelDistantTasks(currentNeededTiles);
     }
 
     // 将缓存内容复制到主canvas
@@ -721,7 +765,7 @@ export const PageCanvas: React.FC<PageCanvasProps> = ({
     bitmapCacheRef,
     getTileState,
     updateTileState,
-    loadBitmap,
+    loadBitmapWithWorker,
     getCacheCanvas,
     getStaticBackgroundCanvas,
     needsFullRender,

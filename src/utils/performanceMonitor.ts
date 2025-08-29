@@ -6,12 +6,14 @@ export interface TileLoadMetrics {
   bitmapTime: number;
   totalFrontendTime: number;
   serverTiming?: {
-    queue: number;
-    setup: number;
-    raster: number;
-    pack: number;
-    encode: number;
-    total: number;
+    queue?: number;
+    setup?: number;
+    raster?: number;
+    pack?: number;
+    encode?: number;
+    write?: number;
+    total?: number;
+    [key: string]: number | undefined;
   };
   pixelInfo?: {
     width: number;

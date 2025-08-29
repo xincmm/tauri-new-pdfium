@@ -7,6 +7,8 @@ import { PdfMetadata, DEFAULT_SCALE } from '../../types/pdf';
 import { PdfContent } from './PdfContent';
 import { PdfToolbar } from './PdfToolbar';
 import { ScrollPerformanceMonitor } from './ScrollPerformanceMonitor';
+
+import { cleanupWorkerLoader } from './PageCanvas';
 import { useScrollHandler } from './hooks/useScrollHandler';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useTileLoader } from './hooks/useTileLoader';
@@ -16,6 +18,7 @@ export const PdfViewer: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [devicePixelRatio] = React.useState(() => window.devicePixelRatio || 1);
+  // const [showDebugger, setShowDebugger] = React.useState(false);
 
   const pdfState = usePdfState();
   const {
@@ -73,6 +76,13 @@ export const PdfViewer: React.FC = () => {
     getTileState: pdfState.getTileState,
     updateTileState: pdfState.updateTileState,
   });
+
+  // 组件卸载时清理Worker
+  useEffect(() => {
+    return () => {
+      cleanupWorkerLoader();
+    };
+  }, []);
 
   // 打开 PDF 文件
   const openPdfFile = async () => {
@@ -157,6 +167,12 @@ export const PdfViewer: React.FC = () => {
           isScrolling={isScrolling}
         />
       )}
+      
+      {/* 性能调试器 */}
+      {/* <PerformanceDebugger 
+        isVisible={showDebugger}
+        onToggle={() => setShowDebugger(!showDebugger)}
+      /> */}
     </div>
   );
 }; 
