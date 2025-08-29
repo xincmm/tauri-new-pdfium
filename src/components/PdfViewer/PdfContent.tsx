@@ -5,7 +5,8 @@ import {
   PdfMetadata, 
   ViewState, 
   PageLayout, 
-  PageTextLayout
+  PageTextLayout,
+  PRELOAD_PAGES_AHEAD
 } from '../../types/pdf';
 import { usePdfState } from '../../hooks/usePdfState';
 import { getVisiblePages } from '../../utils/pdfLayout';
@@ -30,7 +31,7 @@ interface PdfContentProps {
 }
 
 // 全局优先级任务队列 - 降低并发数
-const globalTaskQueue = new PriorityTaskQueue(6);
+const globalTaskQueue = new PriorityTaskQueue(8);
 
 export const PdfContent: React.FC<PdfContentProps> = ({
   pdfMetadata,
@@ -94,15 +95,15 @@ export const PdfContent: React.FC<PdfContentProps> = ({
       return visiblePages;
     }
     
-    // 慢速滚动或静止时添加相邻2页进行预加载
+    // 慢速滚动或静止时添加相邻PRELOAD_PAGES_AHEAD页进行预加载
     if (focusPageIndex !== null) {
       const preloadPageIndices = new Set<number>();
       
       // 添加所有可见页面
       visiblePages.forEach(page => preloadPageIndices.add(page.pageIndex));
       
-      // 添加焦点页面的相邻2页
-      for (let offset = -2; offset <= 2; offset++) {
+      // 添加焦点页面的相邻PRELOAD_PAGES_AHEAD页
+      for (let offset = -PRELOAD_PAGES_AHEAD; offset <= PRELOAD_PAGES_AHEAD; offset++) {
         const targetPageIndex = focusPageIndex + offset;
         if (targetPageIndex >= 0 && targetPageIndex < pageLayouts.length) {
           preloadPageIndices.add(targetPageIndex);

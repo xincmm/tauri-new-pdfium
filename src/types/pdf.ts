@@ -88,5 +88,5 @@ export const BUCKET_STRATEGY = {
 /** @deprecated 使用新的BUCKET_STRATEGY替代 */
 export const POSTER_SCALE_FACTOR = 0.6;
 /** @deprecated 使用BUCKET_STRATEGY.FADE_DELAY_MS替代 */
-export const HIGH_RES_LOAD_DELAY = 300;
-export const PRELOAD_PAGES_AHEAD = 2; // 预加载下面几页 
+export const HIGH_RES_LOAD_DELAY = 200;
+export const PRELOAD_PAGES_AHEAD = 3; // 预加载下面几页 

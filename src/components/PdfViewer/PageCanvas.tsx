@@ -44,7 +44,7 @@ let globalWorkerLoader: WorkerTileLoader | null = null;
 function getWorkerLoader(): WorkerTileLoader {
   if (!globalWorkerLoader) {
     globalWorkerLoader = new WorkerTileLoader({
-      maxConcurrency: 6, // 降低并发数，配合任务队列的6，总共12个并发
+      maxConcurrency: 8, // 降低并发数，配合任务队列的6，总共12个并发
       workerPath: '/workers/tile-loader-worker.js'
     });
     
