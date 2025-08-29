@@ -7,7 +7,7 @@
       ],
       "env": {
         "MCP_FEEDBACK_TIMEOUT": "600",
-        "MCP_PROJECT_DIR": "/Users/chenyuming/Codes/tauri-new-pdfium"
+        "MCP_PROJECT_DIR": "/Users/chenyuming/Codes/tauri/tauri-new-pdfium"
       }
     }
   }
