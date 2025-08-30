@@ -1,4 +1,5 @@
-import { TileInfo, POSTER_SCALE_FACTOR } from '../types/pdf';
+import { TileInfo } from '@/PdfViewer/types/pdf';
+import { POSTER_SCALE_FACTOR } from '@/PdfViewer/config';
 
 // 获取瓦片URL
 export const getTileUrl = (

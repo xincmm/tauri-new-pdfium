@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { PdfMetadata } from '../types/pdf';
+import { PdfMetadata } from '@/PdfViewer/types/pdf';
 
 // PDF加载器 - 使用新的IPC命令
 export class PdfLoader {

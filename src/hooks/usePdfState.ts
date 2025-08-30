@@ -3,9 +3,9 @@ import {
   PdfMetadata, 
   ViewState, 
   PagePosterState, 
-  TileState,
-  DEFAULT_SCALE
-} from '../types/pdf';
+  TileState
+} from '@/PdfViewer/types/pdf';
+import { DEFAULT_SCALE } from '@/PdfViewer/config';
 
 export interface CrossPageSelection {
   startPage: number;

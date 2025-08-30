@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { PageTextLayout, CharBoxPt, BASE_DPI } from '../../types/pdf';
-import { CrossPageSelection } from '../../hooks/usePdfState';
+import { PageTextLayout, CharBoxPt } from '@/PdfViewer/types/pdf';
+import { BASE_DPI } from '@/PdfViewer/config';
+import { CrossPageSelection } from '@/hooks/usePdfState';
 
 interface PdfTextLayerProps {
   pdfId: string;

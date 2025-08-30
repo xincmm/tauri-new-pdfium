@@ -1,5 +1,5 @@
 // 文本选择插件 - 将现有的文本选择功能封装成插件
-import { ReactPDF, PDFEvents } from '../types/pdf-core';
+import { ReactPDF, PDFEvents } from '@/PdfViewer/types/pdf-core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 // 兼容现有的跨页选区类型

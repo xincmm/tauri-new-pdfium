@@ -1,9 +1,9 @@
 // PDF 文档管理器 - 封装 Tauri 命令系统
 import { invoke } from '@tauri-apps/api/core';
-import { PDFiumCore, ReactPDF } from '../types/pdf-core';
+import { PDFiumCore, ReactPDF } from '@/PdfViewer/types/pdf-core';
 
 // 兼容现有类型的适配器
-import { PdfMetadata, PageTextLayout } from '../types/pdf';
+import { PdfMetadata, PageTextLayout } from '@/PdfViewer/types/pdf';
 
 /**
  * PDF 文档管理器
@@ -45,8 +45,7 @@ export class DocumentManager implements ReactPDF.DocumentManager {
    */
   async openFromPath(path: string): Promise<PDFiumCore.DocumentHandle> {
     try {
-      // 使用现有的 Tauri 命令
-                      const metadata = await invoke<PdfMetadata>('load_pdf', { filePath: path });
+        const metadata = await invoke<PdfMetadata>('load_pdf', { filePath: path });
         console.log('🔍 DocumentManager接收到元数据:', metadata);
         
         const handle: PDFiumCore.DocumentHandle = {
@@ -54,7 +53,7 @@ export class DocumentManager implements ReactPDF.DocumentManager {
         handle: 0, // 暂时不需要底层handle
         metadata: {
           pageCount: metadata.total_pages,
-          pageDimensions: metadata.page_dims.map(([width, height]) => ({ width, height })),
+          pageDimensions: metadata.page_dimension_templates.map(([width, height]) => ({ width, height })),
           version: '1.0', // 暂时硬编码
         }
       };
@@ -223,7 +222,8 @@ export class DocumentManager implements ReactPDF.DocumentManager {
     return {
       id: document.id,
       total_pages: document.metadata.pageCount,
-      page_dims: document.metadata.pageDimensions.map(dim => [dim.width, dim.height] as [number, number])
+      page_dimension_templates: document.metadata.pageDimensions.map(dim => [dim.width, dim.height] as [number, number]),
+      page_template_indices: Array.from({ length: document.metadata.pageCount }, () => 0) // 简化版，假设所有页面使用第一个模板
     };
   }
 

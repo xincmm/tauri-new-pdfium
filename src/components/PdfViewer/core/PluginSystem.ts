@@ -1,5 +1,5 @@
 // 插件系统核心实现
-import { ReactPDF } from '../types/pdf-core';
+import { ReactPDF } from '@/PdfViewer/types/pdf-core';
 import { documentManager } from './DocumentManager';
 
 /**

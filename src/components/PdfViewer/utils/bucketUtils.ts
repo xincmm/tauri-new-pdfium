@@ -1,4 +1,5 @@
-import { RenderBucket, BUCKET_STRATEGY } from '../types/pdf';
+import { RenderBucket } from '@/PdfViewer/types/pdf';
+import { BUCKET_STRATEGY } from '@/PdfViewer/config';
 
 /**
  * 生成渲染桶配置

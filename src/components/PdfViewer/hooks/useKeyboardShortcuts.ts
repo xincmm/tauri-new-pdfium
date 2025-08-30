@@ -2,12 +2,14 @@ import { useEffect } from 'react';
 import { 
   PdfMetadata, 
   ViewState, 
-  PageLayout,
+  PageLayout
+} from '@/PdfViewer/types/pdf';
+import {
   MIN_SCALE,
   MAX_SCALE,
   PAGE_MARGIN,
   DEFAULT_SCALE
-} from '../../../types/pdf';
+} from '@/PdfViewer/config';
 
 interface UseKeyboardShortcutsProps {
   pdfMetadata: PdfMetadata | null;
