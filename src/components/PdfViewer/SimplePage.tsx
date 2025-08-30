@@ -41,6 +41,8 @@ export const SimplePage: React.FC<SimplePageProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [tiles, setTiles] = useState<Map<string, ImageBitmap>>(new Map());
   const [isLoading, setIsLoading] = useState(false);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const lastDrawnTilesRef = useRef<Set<string>>(new Set());
 
   const { width: pageWidth, height: pageHeight } = pageLayout;
   const devicePixelRatio = Math.min(window.devicePixelRatio || 1, 2);
@@ -122,44 +124,116 @@ export const SimplePage: React.FC<SimplePageProps> = ({
     }
   }, [isVisible, shouldRender, isLoading, tilesToLoad, tiles, pdfMetadata.id, pageIndex, scale, devicePixelRatio, pageWidth, pageHeight]);
 
-  // 绘制到canvas
-  const drawToCanvas = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || tiles.size === 0) return;
+  // 检查瓦片是否有变化
+  const tilesChanged = useCallback(() => {
+    const currentTileKeys = new Set(tiles.keys());
+    const lastTileKeys = lastDrawnTilesRef.current;
+    
+    if (currentTileKeys.size !== lastTileKeys.size) return true;
+    
+    for (const key of currentTileKeys) {
+      if (!lastTileKeys.has(key)) return true;
+    }
+    
+    return false;
+  }, [tiles]);
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+  // 使用 requestIdleCallback 进行分帧绘制，避免阻塞主线程
+  const drawToCanvasWithIdleCallback = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || tiles.size === 0 || isDrawing) return;
+
+    // 如果瓦片没有变化，跳过绘制
+    if (!tilesChanged()) {
+      return;
+    }
 
     const dpr = devicePixelRatio;
     const targetWidth = Math.floor(pageWidth);
     const targetHeight = Math.floor(pageHeight);
 
-    canvas.width = Math.max(1, Math.floor(targetWidth * dpr));
-    canvas.height = Math.max(1, Math.floor(targetHeight * dpr));
-    canvas.style.width = `${targetWidth}px`;
-    canvas.style.height = `${targetHeight}px`;
+    // 设置 Canvas 尺寸（只在需要时）
+    const needsResize = canvas.width !== Math.max(1, Math.floor(targetWidth * dpr)) ||
+                       canvas.height !== Math.max(1, Math.floor(targetHeight * dpr));
+    
+    if (needsResize) {
+      canvas.width = Math.max(1, Math.floor(targetWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(targetHeight * dpr));
+      canvas.style.width = `${targetWidth}px`;
+      canvas.style.height = `${targetHeight}px`;
+    }
 
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    setIsDrawing(true);
+
+    // 设置高分屏绘制参数
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
+    // 清空画布并填充白色背景
     ctx.clearRect(0, 0, targetWidth, targetHeight);
-    
     ctx.fillStyle = 'white';
     ctx.fillRect(0, 0, targetWidth, targetHeight);
 
-    for (let tx = 0; tx < tilesX; tx++) {
-      for (let ty = 0; ty < tilesY; ty++) {
-        const tileKey = `${pdfMetadata.id}_${pageIndex}_${scale}_${tx}_${ty}_dpr${devicePixelRatio}`;
-        const bitmap = tiles.get(tileKey);
-        if (bitmap) {
-          const x = tx * TILE_SIZE;
-          const y = ty * TILE_SIZE;
-          ctx.drawImage(bitmap, x, y, TILE_SIZE, TILE_SIZE);
+    // 分帧绘制瓦片
+    let currentTileIndex = 0;
+    const tilesToDraw = Array.from(tiles.entries());
+    const tilesPerFrame = Math.max(1, Math.floor(tilesX * tilesY / 4)); // 每帧绘制 1/4 的瓦片
+
+    const drawNextBatch = () => {
+      const startTime = performance.now();
+      
+      while (currentTileIndex < tilesToDraw.length) {
+        const [tileKey, bitmap] = tilesToDraw[currentTileIndex];
+        
+        // 解析瓦片坐标
+        const parts = tileKey.split('_');
+        if (parts.length >= 5) {
+          const tx = parseInt(parts[parts.length - 3]);
+          const ty = parseInt(parts[parts.length - 2]);
+          
+          if (!isNaN(tx) && !isNaN(ty) && tx < tilesX && ty < tilesY) {
+            const x = tx * TILE_SIZE;
+            const y = ty * TILE_SIZE;
+            ctx.drawImage(bitmap, x, y, TILE_SIZE, TILE_SIZE);
+          }
+        }
+        
+        currentTileIndex++;
+        
+        // 如果已绘制足够的瓦片或超时，让出控制权
+        if (currentTileIndex % tilesPerFrame === 0 || performance.now() - startTime > 8) {
+          break;
         }
       }
+
+      if (currentTileIndex < tilesToDraw.length) {
+        // 还有瓦片需要绘制，使用 requestIdleCallback 继续
+        if (window.requestIdleCallback) {
+          window.requestIdleCallback(drawNextBatch, { timeout: 16 });
+        } else {
+          // 回退到 requestAnimationFrame
+          requestAnimationFrame(drawNextBatch);
+        }
+      } else {
+        // 绘制完成
+        lastDrawnTilesRef.current = new Set(tiles.keys());
+        setIsDrawing(false);
+        console.log(`✅ 页面${pageIndex + 1} 分帧绘制完成: ${tiles.size} 瓦片`);
+      }
+    };
+
+    // 开始分帧绘制
+    if (window.requestIdleCallback) {
+      window.requestIdleCallback(drawNextBatch, { timeout: 16 });
+    } else {
+      requestAnimationFrame(drawNextBatch);
     }
-  }, [tiles, pageWidth, pageHeight, devicePixelRatio, tilesX, tilesY, pdfMetadata.id, pageIndex, scale]);
+
+  }, [tiles, pageWidth, pageHeight, devicePixelRatio, tilesX, tilesY, pageIndex, isDrawing, tilesChanged]);
 
   useEffect(() => {
     if (isVisible && shouldRender && !isLoading) {
@@ -169,11 +243,18 @@ export const SimplePage: React.FC<SimplePageProps> = ({
 
   useEffect(() => {
     setTiles(new Map());
+    lastDrawnTilesRef.current = new Set(); // 清空已绘制记录
   }, [scale]);
 
+  // 使用 requestAnimationFrame 来避免过度频繁的绘制
   useEffect(() => {
-    drawToCanvas();
-  }, [tiles, drawToCanvas]);
+    if (tiles.size > 0 && !isDrawing && tilesChanged()) {
+      const rafId = requestAnimationFrame(() => {
+        drawToCanvasWithIdleCallback();
+      });
+      return () => cancelAnimationFrame(rafId);
+    }
+  }, [tiles, drawToCanvasWithIdleCallback, isDrawing, tilesChanged]);
 
   return (
     <div
@@ -183,7 +264,7 @@ export const SimplePage: React.FC<SimplePageProps> = ({
         left: 0,
         width: pageWidth,
         height: pageHeight,
-        background: isLoading ? '#f8f8f8' : 'white',
+        background: isLoading || isDrawing ? '#f8f8f8' : 'white',
         border: '1px solid #d0d0d0',
         borderRadius: '2px',
         boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
@@ -212,7 +293,7 @@ export const SimplePage: React.FC<SimplePageProps> = ({
           fontSize: '12px',
         }}
       >
-        P{pageIndex + 1} | {tiles.size}/{tilesX * tilesY} | rows {tyRange[0]}-{tyRange[1]}
+        P{pageIndex + 1} | {tiles.size}/{tilesX * tilesY} | rows {tyRange[0]}-{tyRange[1]} {isDrawing ? '🖌️' : ''}
       </div>
     </div>
   );
