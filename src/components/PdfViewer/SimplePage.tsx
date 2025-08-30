@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { PdfMetadata, TILE_SIZE } from '../../types/pdf';
 import { batchTileLoader } from '../../utils/batchTileLoader';
 import { useAdaptiveTilePlan } from './hooks/useAdaptiveTilePlan';
+import { getCachedTile, setCachedTile } from '../../utils/tileCache';
 
 interface SimplePageProps {
   pdfMetadata: PdfMetadata;
@@ -63,26 +64,39 @@ export const SimplePage: React.FC<SimplePageProps> = ({
     scrollDirection,
   });
 
-  // 增量渲染当前计划所需的瓦片
+  // 增量渲染当前计划所需的瓦片（含 LRU 缓存读写）
   const renderPlannedTiles = useCallback(async () => {
     if (!isVisible || !shouldRender || isLoading) return;
 
+    const merged = new Map<string, ImageBitmap>(tiles);
     const requests: any[] = [];
+    let addedFromCache = false;
+
     for (const { tx, ty } of tilesToLoad) {
       const tileKey = `${pdfMetadata.id}_${pageIndex}_${scale}_${tx}_${ty}_dpr${devicePixelRatio}`;
-      if (!tiles.get(tileKey)) {
-        requests.push({
-          pdfId: pdfMetadata.id,
-          pageIndex,
-          tx,
-          ty,
-          scale,
-          dpr: devicePixelRatio,
-          pageWidth,
-          pageHeight,
-          tileKey,
-        });
+      if (!merged.get(tileKey)) {
+        const cached = getCachedTile(tileKey, scale);
+        if (cached) {
+          merged.set(tileKey, cached);
+          addedFromCache = true;
+        } else {
+          requests.push({
+            pdfId: pdfMetadata.id,
+            pageIndex,
+            tx,
+            ty,
+            scale,
+            dpr: devicePixelRatio,
+            pageWidth,
+            pageHeight,
+            tileKey,
+          });
+        }
       }
+    }
+
+    if (addedFromCache) {
+      setTiles(merged);
     }
 
     if (requests.length === 0) return;
@@ -91,14 +105,15 @@ export const SimplePage: React.FC<SimplePageProps> = ({
     try {
       const result = await batchTileLoader.renderTilesBatch(requests);
 
-      const merged = new Map<string, ImageBitmap>(tiles);
       for (let i = 0; i < result.tiles.length; i++) {
         const tileData = result.tiles[i];
         const request = requests[i];
         const blob = new Blob([new Uint8Array(tileData.data)], { type: 'image/webp' });
         const bitmap = await createImageBitmap(blob);
         merged.set(request.tileKey, bitmap);
+        setCachedTile(request.tileKey, bitmap, scale);
       }
+
       setTiles(merged);
     } catch (error) {
       console.error(`❌ 页面${pageIndex + 1} 渲染失败:`, error);
