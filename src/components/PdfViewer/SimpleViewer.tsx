@@ -9,7 +9,7 @@ import { PRELOAD_PAGES_AHEAD, SCROLL_DEBOUNCE_MS } from '../../types/pdf';
 export const SimpleViewer: React.FC = () => {
   const [pdfMetadata, setPdfMetadata] = useState<PdfMetadata | null>(null);
   const [viewState, setViewState] = useState({
-    scale: 1.6,
+    scale: 1.4,
     scrollY: 0,
   });
   const lastScrollYRef = useRef(0);
@@ -18,6 +18,8 @@ export const SimpleViewer: React.FC = () => {
   const [isScrollIdle, setIsScrollIdle] = useState<boolean>(true);
   const idleTimerRef = useRef<number | null>(null);
   const [hasInteracted, setHasInteracted] = useState<boolean>(false);
+  const [canPreload, setCanPreload] = useState<boolean>(false);
+  const preloadTimerRef = useRef<number | null>(null);
 
   // 监听容器高度变化
   useEffect(() => {
@@ -34,17 +36,23 @@ export const SimpleViewer: React.FC = () => {
   const pageLayouts = useMemo(() => {
     if (!pdfMetadata) return [];
     return calculatePageLayouts(pdfMetadata, viewState);
-  }, [pdfMetadata, viewState]);
+  }, [pdfMetadata, viewState.scale]);
 
   // 计算可见页面：初次打开仅渲染首屏；交互后再扩展预加载窗口
   const visibleLayouts = useMemo(() => {
     if (!pdfMetadata) return [];
     if (!hasInteracted) {
-      return getVisiblePages(
+      // 首开：首屏可见页 + 额外预加载接下来的 2 页
+      const baseVisible = getVisiblePages(
         pageLayouts,
         containerHeight,
         viewState.scrollY
       );
+      if (baseVisible.length === 0) return [];
+      const firstIdx = baseVisible[0].pageIndex;
+      const lastIdx = baseVisible[baseVisible.length - 1].pageIndex;
+      const endIdx = Math.min(pageLayouts.length - 1, lastIdx + 2);
+      return pageLayouts.filter(l => l.pageIndex >= firstIdx && l.pageIndex <= endIdx);
     }
     return getExpandedVisiblePages(
       pageLayouts,
@@ -104,14 +112,35 @@ export const SimpleViewer: React.FC = () => {
       }));
       // 标记为滚动中，并启动/重启防抖定时器
       setIsScrollIdle(false);
+      setCanPreload(false);
       if (idleTimerRef.current) {
         window.clearTimeout(idleTimerRef.current);
       }
+      if (preloadTimerRef.current) {
+        window.clearTimeout(preloadTimerRef.current);
+      }
       idleTimerRef.current = window.setTimeout(() => {
         setIsScrollIdle(true);
+        // 视口稳定后，稍后再开放预加载，避免与高优先级竞争
+        preloadTimerRef.current = window.setTimeout(() => setCanPreload(true), 120);
       }, SCROLL_DEBOUNCE_MS);
     }
   };
+
+  // 计算预加载页（上下各1页）
+  const preloadPageSet = useMemo(() => {
+    const indices = new Set<number>();
+    if (visibleLayouts.length === 0) return indices;
+    const firstIdx = visibleLayouts[0].pageIndex;
+    const lastIdx = visibleLayouts[visibleLayouts.length - 1].pageIndex;
+    const prev = firstIdx - 1;
+    const next = lastIdx + 1;
+    if (prev >= 0) indices.add(prev);
+    if (pdfMetadata && next < pdfMetadata.total_pages) indices.add(next);
+    // 不与可见页重复
+    for (const v of visiblePageSet) indices.delete(v);
+    return indices;
+  }, [visibleLayouts, visiblePageSet, pdfMetadata]);
 
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
@@ -182,28 +211,38 @@ export const SimpleViewer: React.FC = () => {
               padding: '40px 20px',
             }}
           >
-            {pageLayouts.map((layout) => (
-              <div
-                key={layout.pageIndex}
-                style={{
-                  position: 'absolute',
-                  top: layout.y + 40,
-                  left: 0,
-                  width: '100%',
-                  display: 'flex',
-                  justifyContent: 'center',
-                }}
-              >
-                <SimplePage
-                  pdfMetadata={pdfMetadata}
-                  pageIndex={layout.pageIndex}
-                  pageLayout={layout}
-                  viewState={viewState}
-                  isVisible={visiblePageSet.has(layout.pageIndex)}
-                  shouldRender={isScrollIdle && visiblePageSet.has(layout.pageIndex)}
-                />
-              </div>
-            ))}
+            {pageLayouts.map((layout) => {
+              const isVisible = visiblePageSet.has(layout.pageIndex);
+              const shouldMount = isVisible || (canPreload && preloadPageSet.has(layout.pageIndex));
+              const isPreload = !isVisible && canPreload && preloadPageSet.has(layout.pageIndex);
+              if (!shouldMount) return (
+                <div key={layout.pageIndex} style={{ position: 'absolute', top: layout.y + 40, left: 0, width: '100%', display: 'flex', justifyContent: 'center' }} />
+              );
+              return (
+                <div
+                  key={layout.pageIndex}
+                  style={{
+                    position: 'absolute',
+                    top: layout.y + 40,
+                    left: 0,
+                    width: '100%',
+                    display: 'flex',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <SimplePage
+                    pdfMetadata={pdfMetadata}
+                    pageIndex={layout.pageIndex}
+                    pageLayout={layout}
+                    viewState={viewState}
+                    isVisible={isVisible}
+                    shouldRender={isScrollIdle}
+                    containerRef={containerRef}
+                    preload={isPreload}
+                  />
+                </div>
+              );
+            })}
           </div>
         )}
 
