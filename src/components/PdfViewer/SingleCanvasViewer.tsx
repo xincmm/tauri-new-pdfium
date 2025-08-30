@@ -159,7 +159,6 @@ export const SingleCanvasViewer: React.FC = () => {
 
       return compositionResult.imageBitmap;
     } catch (error) {
-      console.error(`❌ 页面${pageIndex + 1} 渲染失败:`, error);
       return null;
     }
   }, [pdfMetadata, viewState.scale, devicePixelRatio]); // 移除变化频繁的依赖
@@ -207,69 +206,87 @@ export const SingleCanvasViewer: React.FC = () => {
     const dpr = devicePixelRatio;
     const containerWidth = containerRef.current?.clientWidth || window.innerWidth;
 
-    // 设置 Canvas 尺寸
+    // 设置 Canvas 尺寸 - 物理像素
     canvas.width = Math.max(1, Math.floor(containerWidth * dpr));
     canvas.height = Math.max(1, Math.floor(containerHeight * dpr));
     canvas.style.width = `${containerWidth}px`;
     canvas.style.height = `${containerHeight}px`;
 
-    // 设置变换和抗锯齿
+    // 设置变换 - 与SimplePage一致，使用DPR缩放
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingEnabled = false; // 禁用抗锯齿，保持清晰度
     ctx.imageSmoothingQuality = 'high';
 
-    // 清空画布
+    // 清空画布（使用逻辑坐标）
     ctx.clearRect(0, 0, containerWidth, containerHeight);
     ctx.fillStyle = '#e8e8e8';
     ctx.fillRect(0, 0, containerWidth, containerHeight);
 
-    // 计算视口范围
+    // 计算视口范围（逻辑像素）
     const viewportTop = viewState.scrollY;
     const viewportBottom = viewState.scrollY + containerHeight;
 
     // 绘制所有可见页面
     for (const layout of visibleLayouts) {
-      const pageInfo = pageRenderMapRef.current.get(layout.pageIndex);
-      if (!pageInfo?.imageBitmap) continue;
-
       const pageTop = layout.y + 40; // 加上padding
       const pageBottom = pageTop + layout.height;
 
       // 检查页面是否在视口内
       if (pageBottom < viewportTop || pageTop > viewportBottom) continue;
 
-      // 计算页面在画布上的位置
+      // 计算页面在画布上的位置（逻辑像素）
       const canvasX = (containerWidth - layout.width) / 2;
       const canvasY = pageTop - viewState.scrollY;
 
-      // 绘制页面 - 添加ImageBitmap有效性检查
-      try {
-        // 检查ImageBitmap是否有效
-        const bitmap = pageInfo.imageBitmap;
-        if (!bitmap || bitmap.width === 0 || bitmap.height === 0) {
-          console.warn(`页面 ${layout.pageIndex + 1} ImageBitmap无效`);
-          continue;
+      const pageInfo = pageRenderMapRef.current.get(layout.pageIndex);
+      
+      if (pageInfo?.imageBitmap) {
+        // 有内容：绘制实际页面
+        try {
+          const bitmap = pageInfo.imageBitmap;
+          if (bitmap && bitmap.width > 0 && bitmap.height > 0) {
+            ctx.drawImage(
+              bitmap,
+              canvasX,
+              canvasY,
+              layout.width,
+              layout.height
+            );
+          }
+        } catch (error) {
+          // 静默处理错误，绘制空白页
+          pageRenderMapRef.current.delete(layout.pageIndex);
         }
-
-        ctx.drawImage(
-          bitmap,
-          canvasX,
-          canvasY,
-          layout.width,
-          layout.height
-        );
-
-        // 绘制页面边框
-        ctx.strokeStyle = '#d0d0d0';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(canvasX, canvasY, layout.width, layout.height);
-      } catch (error) {
-        console.error(`绘制页面 ${layout.pageIndex + 1} 失败:`, error);
-        // 如果ImageBitmap无效，从map中移除
-        pageRenderMapRef.current.delete(layout.pageIndex);
+      } else {
+        // 无内容：绘制空白页占位
+        if (pageInfo?.isLoading) {
+          // 加载中：纯白背景
+          ctx.fillStyle = 'white';
+          ctx.fillRect(canvasX, canvasY, layout.width, layout.height);
+        } else {
+          // 未开始加载：浅灰背景 + 页码
+          ctx.fillStyle = '#fafafa';
+          ctx.fillRect(canvasX, canvasY, layout.width, layout.height);
+          
+          // 绘制页码
+          ctx.fillStyle = '#ccc';
+          ctx.font = `${Math.max(12, 16 / dpr)}px sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(
+            `${layout.pageIndex + 1}`,
+            canvasX + layout.width / 2,
+            canvasY + layout.height / 2
+          );
+        }
       }
+
+      // 绘制页面边框
+      ctx.strokeStyle = '#d0d0d0';
+      ctx.lineWidth = 1 / dpr;
+      ctx.strokeRect(canvasX, canvasY, layout.width, layout.height);
     }
-  }, [pdfMetadata, visibleLayouts, containerHeight, devicePixelRatio, viewState.scrollY]); // 重新添加必要的依赖
+  }, [pdfMetadata, visibleLayouts, containerHeight, devicePixelRatio, viewState.scrollY]);
 
   // 管理页面渲染 - 使用稳定的key避免循环
   const visiblePagesKey = useMemo(() => {
@@ -317,14 +334,12 @@ export const SingleCanvasViewer: React.FC = () => {
       });
 
       if (selected) {
-        console.log(`🔍 正在加载PDF: ${selected}`);
         const metadata = await invoke<PdfMetadata>('load_pdf', { filePath: selected });
-        console.log('📄 PDF元数据:', metadata);
         setPdfMetadata(metadata);
         pageRenderMapRef.current.clear(); // 清理旧的渲染状态
       }
     } catch (error) {
-      console.error('❌ PDF加载失败:', error);
+      // PDF loading failed
     }
   };
 
@@ -347,6 +362,11 @@ export const SingleCanvasViewer: React.FC = () => {
         ...prev,
         scrollY: target.scrollTop,
       }));
+      
+      // 滚动时立即重绘，显示空白页占位
+      requestAnimationFrame(() => {
+        drawToCanvas();
+      });
       
       setIsScrollIdle(false);
       if (idleTimerRef.current) {
@@ -427,6 +447,7 @@ export const SingleCanvasViewer: React.FC = () => {
               left: 0,
               pointerEvents: 'none', // 允许滚动事件穿透
               zIndex: 1,
+              imageRendering: 'crisp-edges', // 防止浏览器模糊化处理
             }}
           />
         </div>

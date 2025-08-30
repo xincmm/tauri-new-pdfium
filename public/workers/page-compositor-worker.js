@@ -91,7 +91,7 @@ self.onmessage = async ({ data }) => {
         });
         break;
       default:
-        console.warn('Unknown worker message type:', type);
+      // Unknown message type
     }
   } catch (error) {
     self.postMessage({
@@ -125,11 +125,12 @@ async function handlePageComposition(data) {
       Math.max(1, Math.floor(pageWidth * dpr)),
       Math.max(1, Math.floor(pageHeight * dpr))
     );
+
     const ctx = canvas.getContext('2d');
 
     // Set up canvas transform for logical coordinates
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingEnabled = false; // 禁用抗锯齿，保持瓦片边界清晰
     ctx.imageSmoothingQuality = 'high';
 
     // Clear and fill with white background
@@ -162,8 +163,7 @@ async function handlePageComposition(data) {
           tileBitmaps.set(`${tx}_${ty}`, bitmap);
           cacheMisses++;
         } catch (error) {
-          console.error(`Failed to decode tile ${tileKey}:`, error);
-          // Continue with other tiles
+          // Failed to decode tile, continue with others
         }
       }
     }
@@ -173,9 +173,16 @@ async function handlePageComposition(data) {
       for (let ty = 0; ty < tilesY; ty++) {
         const bitmap = tileBitmaps.get(`${tx}_${ty}`);
         if (bitmap) {
+          // 关键修复：确保瓦片按正确的逻辑尺寸绘制
+          // Worker上下文已设置DPR transform，所以使用逻辑坐标绘制
           const x = tx * tileSize;
           const y = ty * tileSize;
-          ctx.drawImage(bitmap, x, y, tileSize, tileSize);
+
+          // 瓦片的逻辑尺寸（高DPR瓦片的显示尺寸）
+          const drawWidth = Math.min(tileSize, bitmap.width / dpr);
+          const drawHeight = Math.min(tileSize, bitmap.height / dpr);
+
+          ctx.drawImage(bitmap, x, y, drawWidth, drawHeight);
         }
       }
     }
@@ -198,7 +205,6 @@ async function handlePageComposition(data) {
     }, [finalBitmap]); // Transfer ownership
 
   } catch (error) {
-    console.error('Page composition failed:', error);
     self.postMessage({
       type: 'composition-error',
       id,
@@ -207,4 +213,3 @@ async function handlePageComposition(data) {
   }
 }
 
-console.log('🎨 Page Compositor Worker initialized with 4GB tile cache'); 
