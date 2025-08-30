@@ -44,7 +44,7 @@ function calculateTilePlan(
 export const SingleCanvasViewer: React.FC = () => {
   const [pdfMetadata, setPdfMetadata] = useState<PdfMetadata | null>(null);
   const [viewState, setViewState] = useState({
-    scale: 1.2,
+    scale: 1,
     scrollY: 0,
     scrollX: 0,
   });
@@ -593,7 +593,7 @@ export const SingleCanvasViewer: React.FC = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <button onClick={() => handleZoom(-0.25)}>-</button>
               <span>{Math.round(viewState.scale * 100)}%</span>
-              <button onClick={() => handleZoom(0.25)}>+</button>
+              <button onClick={() => handleZoom(0.20)}>+</button>
             </div>
 
             <span style={{ color: '#666', fontSize: '14px' }}>
