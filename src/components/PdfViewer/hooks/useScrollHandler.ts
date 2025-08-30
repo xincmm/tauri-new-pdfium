@@ -1,5 +1,5 @@
-import { useState, useRef, useCallback } from "react";
 import { SCROLL_DEBOUNCE_MS, SLOW_SPEED_THRESHOLD } from "@/PdfViewer/config";
+import { useCallback, useRef, useState } from "react";
 
 interface ScrollState {
   scrollY: number;

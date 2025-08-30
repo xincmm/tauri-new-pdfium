@@ -1,4 +1,4 @@
-import { PdfMetadata, ViewState, PageLayout, getPageDimensions } from "@/PdfViewer/types/pdf";
+import { type PageLayout, type PdfMetadata, type ViewState, getPageDimensions } from "@/PdfViewer/types/pdf";
 
 export function calculatePageLayouts(pdfMetadata: PdfMetadata, viewState: ViewState): PageLayout[] {
   const { scale } = viewState;

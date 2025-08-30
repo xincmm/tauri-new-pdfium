@@ -71,7 +71,7 @@ export class WorkerTileLoader {
       priority: number;
       options?: RequestInit;
     }>,
-    reason: string = "viewport-change",
+    reason = "viewport-change",
   ) {
     // 推进epoch
     this.currentEpoch++;
@@ -168,7 +168,7 @@ export class WorkerTileLoader {
     console.error("Worker error:", error);
     // 清理所有待处理的任务
     this.pendingTasks.forEach(({ reject }) => {
-      reject(new Error("Worker error: " + error.message));
+      reject(new Error(`Worker error: ${error.message}`));
     });
     this.pendingTasks.clear();
     this.activeTasks.clear();
@@ -271,13 +271,7 @@ export class WorkerTileLoader {
   /**
    * 加载瓦片 - 保持兼容性，建议使用reconcile
    */
-  loadTile(
-    id: string,
-    url: string,
-    priority: number = 100,
-    options?: RequestInit,
-    epoch?: number,
-  ): Promise<TileLoadResult> {
+  loadTile(id: string, url: string, priority = 100, options?: RequestInit, epoch?: number): Promise<TileLoadResult> {
     if (this.isDestroyed) {
       return Promise.reject(new Error("WorkerTileLoader is destroyed"));
     }
@@ -365,7 +359,7 @@ export class WorkerTileLoader {
   async testFetchPerformance(url: string): Promise<void> {
     if (!this.worker) return;
 
-    const testId = "fetch-test-" + Date.now();
+    const testId = `fetch-test-${Date.now()}`;
     this.worker.postMessage({
       type: "fetch-test",
       id: testId,

@@ -1,6 +1,6 @@
-import { useState, useCallback } from "react";
-import { PdfMetadata, ViewState, PagePosterState, TileState } from "@/PdfViewer/types/pdf";
 import { DEFAULT_SCALE } from "@/PdfViewer/config";
+import type { PagePosterState, PdfMetadata, TileState, ViewState } from "@/PdfViewer/types/pdf";
+import { useCallback, useState } from "react";
 
 export interface CrossPageSelection {
   startPage: number;

@@ -1,12 +1,13 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
-import { useScrollHandler } from "./hooks/useScrollHandler";
-import { useZoomController } from "./hooks/useZoomController";
-import { useViewportManager } from "./hooks/useViewportManager";
+import type React from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { renderManager } from "./core/RenderManager";
 import { useCanvasRenderer } from "./hooks/useCanvasRenderer";
 import { usePdfLoader } from "./hooks/usePdfLoader";
+import { useScrollHandler } from "./hooks/useScrollHandler";
+import { useViewportManager } from "./hooks/useViewportManager";
+import { useZoomController } from "./hooks/useZoomController";
 import { ToolbarPlugin } from "./plugins/ToolbarPlugin";
 import { ViewportPlugin } from "./plugins/ViewportPlugin";
-import { renderManager } from "./core/RenderManager";
 
 export const SingleCanvasViewer: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -86,6 +87,7 @@ export const SingleCanvasViewer: React.FC = () => {
   });
 
   // 设置渲染管理器的回调
+  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
     renderManager.setRenderCallback(async (pageIndex, layout) => {
       // 在RenderManager中记录开始状态
@@ -178,6 +180,7 @@ export const SingleCanvasViewer: React.FC = () => {
   ]);
 
   // 自动居中处理
+  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
     viewportManager.autoCenter(hasInteracted, (x, y) => {
       setViewState((prev) => ({ ...prev, scrollX: x, scrollY: y }));
@@ -185,6 +188,7 @@ export const SingleCanvasViewer: React.FC = () => {
   }, [viewportManager.viewportState.maxPageWidth, viewState.scale, hasInteracted]);
 
   // 应用缩放后的滚动位置
+  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
     applyTargetScroll(containerRef, (x, y) => {
       setViewState((prev) => ({ ...prev, scrollX: x, scrollY: y }));
@@ -192,6 +196,7 @@ export const SingleCanvasViewer: React.FC = () => {
   }, [viewState.scale, applyTargetScroll]);
 
   // Canvas重绘
+  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
     if (canvasRenderer.drawToCanvas && viewportManager.visibleLayouts) {
       canvasRenderer.drawToCanvas(

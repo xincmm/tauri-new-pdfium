@@ -1,5 +1,5 @@
-import React from "react";
-import { PdfMetadata } from "@/PdfViewer/types/pdf";
+import type { PdfMetadata } from "@/PdfViewer/types/pdf";
+import type React from "react";
 
 interface ToolbarPluginProps {
   pdfMetadata: PdfMetadata | null;

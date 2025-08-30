@@ -93,7 +93,7 @@ export function calculateOverscan(
   velocity: ScrollVelocity,
   tileWidth: number,
   tileHeight: number,
-  predictionTimeMs: number = 95, // 95ms 预测时间
+  predictionTimeMs = 95, // 95ms 预测时间
 ): OverscanConfig {
   // 防止除零错误
   const safeTileWidth = Math.max(1, tileWidth || 1);
@@ -107,8 +107,8 @@ export function calculateOverscan(
   const rows = Math.min(4, Math.ceil(projectedDy / safeTileHeight) + 1);
 
   return {
-    extraCols: Math.max(1, isNaN(cols) ? 1 : cols),
-    extraRows: Math.max(1, isNaN(rows) ? 1 : rows),
+    extraCols: Math.max(1, Number.isNaN(cols) ? 1 : cols),
+    extraRows: Math.max(1, Number.isNaN(rows) ? 1 : rows),
   };
 }
 
@@ -120,7 +120,7 @@ export function calculateScrollVelocity(
   lastScrollY: number,
   deltaTime: number,
 ): ScrollVelocity {
-  if (deltaTime <= 0 || isNaN(deltaTime)) {
+  if (deltaTime <= 0 || Number.isNaN(deltaTime)) {
     return { vx: 0, vy: 0 };
   }
 
@@ -129,7 +129,7 @@ export function calculateScrollVelocity(
 
   return {
     vx: 0, // PDF查看器主要是垂直滚动
-    vy: isNaN(velocity) ? 0 : velocity,
+    vy: Number.isNaN(velocity) ? 0 : velocity,
   };
 }
 
@@ -152,7 +152,7 @@ export function canShowWithoutUpscaling(
 export function isLargeJump(
   deltaY: number,
   viewportHeight: number,
-  threshold: number = 1.0, // 超过一屏的比例
+  threshold = 1.0, // 超过一屏的比例
 ): boolean {
   return Math.abs(deltaY) > viewportHeight * threshold;
 }

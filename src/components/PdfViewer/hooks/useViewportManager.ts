@@ -1,7 +1,7 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
-import { PdfMetadata } from "@/PdfViewer/types/pdf";
-import { calculatePageLayouts, getExpandedVisiblePages, getVisiblePages } from "@/PdfViewer/utils/pdfLayout";
 import { H_PADDING } from "@/PdfViewer/config";
+import type { PdfMetadata } from "@/PdfViewer/types/pdf";
+import { calculatePageLayouts, getExpandedVisiblePages, getVisiblePages } from "@/PdfViewer/utils/pdfLayout";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 interface ViewportState {
   containerHeight: number;
@@ -53,6 +53,7 @@ export const useViewportManager = (options: UseViewportManagerOptions) => {
   }, [options.containerRef]);
 
   // 计算页面布局
+  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   const pageLayouts = useMemo(() => {
     if (!options.pdfMetadata) return [];
     return calculatePageLayouts(options.pdfMetadata, { scale: options.scale, scrollY: options.scrollY });

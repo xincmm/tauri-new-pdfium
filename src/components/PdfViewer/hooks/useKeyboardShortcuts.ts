@@ -1,6 +1,6 @@
+import { DEFAULT_SCALE, MAX_SCALE, MIN_SCALE, PAGE_MARGIN } from "@/PdfViewer/config";
+import type { PageLayout, PdfMetadata, ViewState } from "@/PdfViewer/types/pdf";
 import { useEffect } from "react";
-import { PdfMetadata, ViewState, PageLayout } from "@/PdfViewer/types/pdf";
-import { MIN_SCALE, MAX_SCALE, PAGE_MARGIN, DEFAULT_SCALE } from "@/PdfViewer/config";
 
 interface UseKeyboardShortcutsProps {
   pdfMetadata: PdfMetadata | null;
@@ -47,6 +47,7 @@ export const useKeyboardShortcuts = ({
   };
 
   // 键盘快捷键
+  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!pdfMetadata) return;

@@ -56,8 +56,8 @@ class PerformanceMonitor {
       const trimmed = entry.trim();
       const [name, durPart] = trimmed.split(";dur=");
       if (name && durPart) {
-        const duration = parseFloat(durPart);
-        if (!isNaN(duration)) {
+        const duration = Number.parseFloat(durPart);
+        if (!Number.isNaN(duration)) {
           switch (name.trim()) {
             case "queue":
               timing.queue = duration;
@@ -92,8 +92,8 @@ class PerformanceMonitor {
     const match = pixelHeader.match(/(\d+)x(\d+)/);
     if (match) {
       return {
-        width: parseInt(match[1]),
-        height: parseInt(match[2]),
+        width: Number.parseInt(match[1]),
+        height: Number.parseInt(match[2]),
       };
     }
     return undefined;
@@ -152,7 +152,7 @@ class PerformanceMonitor {
   getBottleneckAnalysis() {
     const stats = this.getRecentStats(20);
 
-    const bottlenecks = [];
+    const bottlenecks: string[] = [];
 
     if (stats.avgNetworkTime > 100) {
       bottlenecks.push(`网络延迟高 (${stats.avgNetworkTime.toFixed(1)}ms)`);
@@ -184,13 +184,14 @@ class PerformanceMonitor {
 
     if (stats.avgServerRender > stats.avgNetworkTime) {
       return "建议优化服务端渲染性能";
-    } else if (stats.avgNetworkTime > 100) {
-      return "建议检查网络连接或启用更积极的缓存策略";
-    } else if (stats.avgBitmapTime > 50) {
-      return "建议检查图片解码性能，可能需要降低图片质量";
-    } else {
-      return "建议检查整体系统负载";
     }
+    if (stats.avgNetworkTime > 100) {
+      return "建议检查网络连接或启用更积极的缓存策略";
+    }
+    if (stats.avgBitmapTime > 50) {
+      return "建议检查图片解码性能，可能需要降低图片质量";
+    }
+    return "建议检查整体系统负载";
   }
 
   // 清空统计数据

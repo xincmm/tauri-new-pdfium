@@ -23,9 +23,9 @@ export class PriorityTaskQueue {
   private runningTasks = 0;
   private readonly maxConcurrency: number;
   private focusPageIndex: number | null = null;
-  private currentEpoch: number = 0; // 当前epoch
+  private currentEpoch = 0; // 当前epoch
 
-  constructor(maxConcurrency: number = 6) {
+  constructor(maxConcurrency = 6) {
     // 降低默认并发数到6
     this.maxConcurrency = maxConcurrency;
   }
@@ -48,7 +48,7 @@ export class PriorityTaskQueue {
    * Reconcile方法：以集合对账的方式管理任务
    * 这是epoch机制的核心：只保留当前需要的任务，丢弃所有历史债务
    */
-  reconcile(neededTasks: TaskSpec[], reason: string = "viewport-change") {
+  reconcile(neededTasks: TaskSpec[], reason = "viewport-change") {
     // 每次reconcile都推进epoch
     this.currentEpoch++;
 

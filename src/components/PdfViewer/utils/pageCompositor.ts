@@ -85,7 +85,7 @@ export class PageCompositor {
     console.error("Page compositor worker error:", error);
     // Reject all pending requests
     this.pendingRequests.forEach(({ reject }) => {
-      reject(new Error("Worker error: " + error.message));
+      reject(new Error(`Worker error: ${error.message}`));
     });
     this.pendingRequests.clear();
   }
@@ -139,7 +139,7 @@ export class PageCompositor {
    */
   clearCache(): void {
     if (this.worker) {
-      this.worker.postMessage({ type: "clear-cache", id: "clear_" + Date.now() });
+      this.worker.postMessage({ type: "clear-cache", id: `clear_${Date.now()}` });
     }
   }
 
@@ -148,7 +148,7 @@ export class PageCompositor {
    */
   getCacheStats(): void {
     if (this.worker) {
-      this.worker.postMessage({ type: "get-cache-stats", id: "stats_" + Date.now() });
+      this.worker.postMessage({ type: "get-cache-stats", id: `stats_${Date.now()}` });
     }
   }
 

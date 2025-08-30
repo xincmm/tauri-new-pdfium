@@ -1,6 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
-import { TileRequest, TileData, BatchTileResult } from "@/PdfViewer/types/pdf";
 import { TILE_SIZE } from "@/PdfViewer/config";
+import type { BatchTileResult, TileData, TileRequest } from "@/PdfViewer/types/pdf";
+import { invoke } from "@tauri-apps/api/core";
 
 // 批量瓦片加载器
 export class BatchTileLoader {

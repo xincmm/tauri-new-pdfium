@@ -1,8 +1,8 @@
+import { HIGH_RES_LOAD_DELAY, PRELOAD_PAGES_AHEAD, TILE_SIZE } from "@/PdfViewer/config";
+import type { PageLayout, PdfMetadata, ViewState } from "@/PdfViewer/types/pdf";
+import { getExpandedVisiblePages, getVisiblePages } from "@/PdfViewer/utils/pdfLayout";
+import type { usePdfState } from "@/hooks/usePdfState";
 import { useEffect } from "react";
-import { PdfMetadata, ViewState, PageLayout } from "@/PdfViewer/types/pdf";
-import { TILE_SIZE, HIGH_RES_LOAD_DELAY, PRELOAD_PAGES_AHEAD } from "@/PdfViewer/config";
-import { usePdfState } from "@/hooks/usePdfState";
-import { getVisiblePages, getExpandedVisiblePages } from "@/PdfViewer/utils/pdfLayout";
 // 生成瓦片缓存键
 const generateTileKey = (tileInfo: { id: string; page: number; scale: number; tx: number; ty: number }): string => {
   return `${tileInfo.id}_${tileInfo.page}_${tileInfo.scale}_${tileInfo.tx}_${tileInfo.ty}`;

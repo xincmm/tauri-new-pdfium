@@ -1,9 +1,9 @@
+import { PDFiumCore, type ReactPDF } from "@/PdfViewer/types/pdf-core";
 // PDF 文档管理器 - 封装 Tauri 命令系统
 import { invoke } from "@tauri-apps/api/core";
-import { PDFiumCore, ReactPDF } from "@/PdfViewer/types/pdf-core";
 
 // 兼容现有类型的适配器
-import { PdfMetadata, PageTextLayout } from "@/PdfViewer/types/pdf";
+import type { PageTextLayout, PdfMetadata } from "@/PdfViewer/types/pdf";
 
 /**
  * PDF 文档管理器

@@ -1,5 +1,5 @@
-import { useState, useRef, useCallback } from "react";
-import { MIN_SCALE, MAX_SCALE } from "@/PdfViewer/config";
+import { MAX_SCALE, MIN_SCALE } from "@/PdfViewer/config";
+import { useCallback, useRef, useState } from "react";
 
 interface ZoomState {
   scale: number;
@@ -103,7 +103,7 @@ export const useZoomController = (options: UseZoomControllerOptions = {}) => {
 
   // 缩放到适合宽度
   const zoomToFitWidth = useCallback(
-    (containerWidth: number, pageWidth: number, padding: number = 40) => {
+    (containerWidth: number, pageWidth: number, padding = 40) => {
       const availableWidth = containerWidth - padding * 2;
       const targetScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, availableWidth / pageWidth));
       setZoomLevel(targetScale);
@@ -113,7 +113,7 @@ export const useZoomController = (options: UseZoomControllerOptions = {}) => {
 
   // 缩放到适合页面
   const zoomToFitPage = useCallback(
-    (containerWidth: number, containerHeight: number, pageWidth: number, pageHeight: number, padding: number = 40) => {
+    (containerWidth: number, containerHeight: number, pageWidth: number, pageHeight: number, padding = 40) => {
       const availableWidth = containerWidth - padding * 2;
       const availableHeight = containerHeight - padding * 2;
       const scaleX = availableWidth / pageWidth;

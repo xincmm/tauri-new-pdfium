@@ -1,8 +1,8 @@
-import { TileInfo } from "@/PdfViewer/types/pdf";
 import { POSTER_SCALE_FACTOR } from "@/PdfViewer/config";
+import type { TileInfo } from "@/PdfViewer/types/pdf";
 
 // 获取瓦片URL
-export const getTileUrl = (tileInfo: TileInfo, devicePixelRatio: number, isHighRes: boolean = true): string => {
+export const getTileUrl = (tileInfo: TileInfo, devicePixelRatio: number, isHighRes = true): string => {
   const { id, page, scale, tx, ty } = tileInfo;
   // 根据设备像素比调整请求的缩放级别，确保高DPI屏幕的清晰度
   const baseScale = isHighRes ? scale * devicePixelRatio : scale * devicePixelRatio * POSTER_SCALE_FACTOR;

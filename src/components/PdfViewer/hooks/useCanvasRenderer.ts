@@ -1,8 +1,8 @@
-import { useRef, useCallback, useState, useEffect } from "react";
-import { PdfMetadata } from "@/PdfViewer/types/pdf";
-import { batchTileLoader } from "@/PdfViewer/utils/batchTileLoader";
-import { pageCompositor, type TileData } from "@/PdfViewer/utils/pageCompositor";
 import { DPR_MAX, TILE_SIZE } from "@/PdfViewer/config";
+import type { PdfMetadata } from "@/PdfViewer/types/pdf";
+import { batchTileLoader } from "@/PdfViewer/utils/batchTileLoader";
+import { type TileData, pageCompositor } from "@/PdfViewer/utils/pageCompositor";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface PageRenderInfo {
   pageIndex: number;
@@ -265,6 +265,7 @@ export const useCanvasRenderer = (options: UseCanvasRendererOptions) => {
   }, []);
 
   // 缩放变化时清理所有页面
+  // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
     clearCache();
   }, [options.scale, clearCache]);

@@ -1,7 +1,7 @@
-import { useState, useCallback } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import type { PdfMetadata } from "@/PdfViewer/types/pdf";
 import { invoke } from "@tauri-apps/api/core";
-import { PdfMetadata } from "@/PdfViewer/types/pdf";
+import { open } from "@tauri-apps/plugin-dialog";
+import { useCallback, useState } from "react";
 
 interface PdfLoaderState {
   pdfMetadata: PdfMetadata | null;
