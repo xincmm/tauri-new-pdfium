@@ -9,7 +9,7 @@ import { PRELOAD_PAGES_AHEAD, SCROLL_DEBOUNCE_MS } from '../../types/pdf';
 export const SimpleViewer: React.FC = () => {
   const [pdfMetadata, setPdfMetadata] = useState<PdfMetadata | null>(null);
   const [viewState, setViewState] = useState({
-    scale: 1.4,
+    scale: 1.2,
     scrollY: 0,
   });
   const lastScrollYRef = useRef(0);
@@ -208,6 +208,9 @@ export const SimpleViewer: React.FC = () => {
                     viewState={viewState}
                     isVisible={true}
                     shouldRender={isScrollIdle}
+                    viewportTop={viewState.scrollY}
+                    viewportHeight={containerHeight}
+                    pageTopAbs={layout.y + 40}
                   />
                 )}
               </div>
