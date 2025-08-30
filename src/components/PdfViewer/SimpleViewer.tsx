@@ -208,9 +208,6 @@ export const SimpleViewer: React.FC = () => {
                     viewState={viewState}
                     isVisible={true}
                     shouldRender={isScrollIdle}
-                    pageTop={layout.y + 40}
-                    viewportTop={viewState.scrollY}
-                    viewportBottom={viewState.scrollY + containerHeight}
                   />
                 )}
               </div>
