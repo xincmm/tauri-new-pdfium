@@ -31,8 +31,11 @@ export const SingleCanvasViewer: React.FC = () => {
     onZoomChange: (scale) => {
       setViewState(prev => ({ ...prev, scale }));
       renderManager.clearPagesExceptScale(scale);
-      renderManager.bumpEpoch();
       renderManager.setEnabled(false);
+      requestAnimationFrame(() => {
+        renderManager.setEnabled(true);
+        renderManager.bumpEpoch();
+      });
     },
     onInteractionDetected: () => setHasInteracted(true)
   });
@@ -135,13 +138,16 @@ export const SingleCanvasViewer: React.FC = () => {
   // 处理空闲时的渲染队列
   useEffect(() => {
     if (!scrollState.isScrollIdle || !pdfMetadata) return;
-
-    renderManager.enqueueIdleTasks(
-      viewportManager.visibleLayouts,
-      viewportManager.viewportState.containerHeight,
-      viewState.scrollY,
-      viewState.scale
-    );
+    
+    // 确保有可见布局且渲染管理器已启用
+    if (viewportManager.visibleLayouts && viewportManager.visibleLayouts.length > 0) {
+      renderManager.enqueueIdleTasks(
+        viewportManager.visibleLayouts,
+        viewportManager.viewportState.containerHeight,
+        viewState.scrollY,
+        viewState.scale
+      );
+    }
   }, [
     scrollState.isScrollIdle,
     pdfMetadata,
@@ -201,18 +207,16 @@ export const SingleCanvasViewer: React.FC = () => {
     viewportManager.viewportState.containerWidth
   ]);
 
-  // 缩放控制函数
   const handleZoomIn = useCallback(() => {
     handleZoom(0.20, containerRef, viewState.scrollX, viewState.scrollY);
   }, [handleZoom, viewState.scrollX, viewState.scrollY]);
 
   const handleZoomOut = useCallback(() => {
-    handleZoom(-0.25, containerRef, viewState.scrollX, viewState.scrollY);
+    handleZoom(-0.20, containerRef, viewState.scrollX, viewState.scrollY);
   }, [handleZoom, viewState.scrollX, viewState.scrollY]);
 
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      {/* 工具栏 */}
       <ToolbarPlugin
         pdfMetadata={pdfMetadata}
         isLoading={isLoading}
@@ -223,7 +227,6 @@ export const SingleCanvasViewer: React.FC = () => {
         onZoomOut={handleZoomOut}
       />
 
-      {/* PDF内容区 */}
       <ViewportPlugin
         pdfMetadata={pdfMetadata}
         totalHeight={viewportManager.viewportState.totalHeight}

@@ -229,11 +229,11 @@ export const useCanvasRenderer = (options: UseCanvasRendererOptions) => {
           ctx.font = `${Math.max(12, 16 / dpr)}px sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(
-            `${layout.pageIndex + 1}`,
-            canvasX + layout.width / 2,
-            canvasY + layout.height / 2
-          );
+          // ctx.fillText(
+          //   `${layout.pageIndex + 1}`,
+          //   canvasX + layout.width / 2,
+          //   canvasY + layout.height / 2
+          // );
         }
       }
 
