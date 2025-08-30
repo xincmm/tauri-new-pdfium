@@ -21,13 +21,13 @@ export const PRELOAD_PAGES_AHEAD = 3;
 
 // 渲染桶策略配置
 export const BUCKET_STRATEGY = {
-  TARGET_FACTOR: 1.0,        // 目标桶倍数（1:1像素对齐）
-  HIGHER_FACTOR: 1.2,        // 更清一档倍数（占位用）
-  LOWER_FACTOR: 0.8,         // 备用低清倍数
-  FADE_DELAY_MS: 140,        // 静止后淡入延迟时间
-  FADE_DURATION_MS: 200,     // 淡入动画时长
+  TARGET_FACTOR: 1.0, // 目标桶倍数（1:1像素对齐）
+  HIGHER_FACTOR: 1.2, // 更清一档倍数（占位用）
+  LOWER_FACTOR: 0.8, // 备用低清倍数
+  FADE_DELAY_MS: 140, // 静止后淡入延迟时间
+  FADE_DURATION_MS: 200, // 淡入动画时长
 } as const;
 
 // 渲染优化配置
 export const POSTER_SCALE_FACTOR = 0.6;
-export const HIGH_RES_LOAD_DELAY = 200; 
+export const HIGH_RES_LOAD_DELAY = 200;

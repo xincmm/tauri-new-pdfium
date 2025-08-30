@@ -1,11 +1,6 @@
-import { useState, useCallback } from 'react';
-import { 
-  PdfMetadata, 
-  ViewState, 
-  PagePosterState, 
-  TileState
-} from '@/PdfViewer/types/pdf';
-import { DEFAULT_SCALE } from '@/PdfViewer/config';
+import { useState, useCallback } from "react";
+import { PdfMetadata, ViewState, PagePosterState, TileState } from "@/PdfViewer/types/pdf";
+import { DEFAULT_SCALE } from "@/PdfViewer/config";
 
 export interface CrossPageSelection {
   startPage: number;
@@ -31,13 +26,16 @@ export const usePdfState = () => {
   const [crossPageSelection, setCrossPageSelection] = useState<CrossPageSelection | null>(null);
 
   // 获取页面海报图状态
-  const getPagePosterState = useCallback((key: string): PagePosterState => {
-    return pagePosterStates.get(key) || { loaded: false, loading: false };
-  }, [pagePosterStates]);
+  const getPagePosterState = useCallback(
+    (key: string): PagePosterState => {
+      return pagePosterStates.get(key) || { loaded: false, loading: false };
+    },
+    [pagePosterStates],
+  );
 
   // 更新页面海报图状态
   const updatePagePosterState = useCallback((key: string, updates: Partial<PagePosterState>) => {
-    setPagePosterStates(prev => {
+    setPagePosterStates((prev) => {
       const newMap = new Map(prev);
       const currentState = newMap.get(key) || { loaded: false, loading: false };
       newMap.set(key, { ...currentState, ...updates });
@@ -46,13 +44,16 @@ export const usePdfState = () => {
   }, []);
 
   // 获取瓦片状态
-  const getTileState = useCallback((key: string): TileState => {
-    return tileStates.get(key) || { loaded: false, loading: false };
-  }, [tileStates]);
+  const getTileState = useCallback(
+    (key: string): TileState => {
+      return tileStates.get(key) || { loaded: false, loading: false };
+    },
+    [tileStates],
+  );
 
   // 更新瓦片状态
   const updateTileState = useCallback((key: string, updates: Partial<TileState>) => {
-    setTileStates(prev => {
+    setTileStates((prev) => {
       const newMap = new Map(prev);
       const currentState = newMap.get(key) || { loaded: false, loading: false };
       newMap.set(key, { ...currentState, ...updates });
@@ -86,11 +87,11 @@ export const usePdfState = () => {
     setLastScrollY,
     pagePosterStates,
     tileStates,
-    
+
     // 跨页选区
     crossPageSelection,
     setCrossPageSelection,
-    
+
     // 方法
     getPagePosterState,
     updatePagePosterState,
@@ -98,4 +99,4 @@ export const usePdfState = () => {
     updateTileState,
     clearStates,
   };
-}; 
+};

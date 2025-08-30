@@ -1,7 +1,7 @@
-import { useState, useCallback } from 'react';
-import { open } from '@tauri-apps/plugin-dialog';
-import { invoke } from '@tauri-apps/api/core';
-import { PdfMetadata } from '@/PdfViewer/types/pdf';
+import { useState, useCallback } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { PdfMetadata } from "@/PdfViewer/types/pdf";
 
 interface PdfLoaderState {
   pdfMetadata: PdfMetadata | null;
@@ -25,18 +25,20 @@ export const usePdfLoader = (options: UsePdfLoaderOptions = {}) => {
   // 打开PDF文件
   const handleOpenPdf = useCallback(async () => {
     try {
-      setState(prev => ({ ...prev, isLoading: true, error: null }));
+      setState((prev) => ({ ...prev, isLoading: true, error: null }));
 
       const selected = await open({
-        filters: [{
-          name: 'PDF',
-          extensions: ['pdf']
-        }]
+        filters: [
+          {
+            name: "PDF",
+            extensions: ["pdf"],
+          },
+        ],
       });
 
       if (selected) {
-        const metadata = await invoke<PdfMetadata>('load_pdf', { filePath: selected });
-        
+        const metadata = await invoke<PdfMetadata>("load_pdf", { filePath: selected });
+
         setState({
           pdfMetadata: metadata,
           isLoading: false,
@@ -47,10 +49,10 @@ export const usePdfLoader = (options: UsePdfLoaderOptions = {}) => {
         options.onClearRender?.();
         options.onPdfLoaded?.(metadata);
       } else {
-        setState(prev => ({ ...prev, isLoading: false }));
+        setState((prev) => ({ ...prev, isLoading: false }));
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'PDF loading failed';
+      const errorMessage = error instanceof Error ? error.message : "PDF loading failed";
       setState({
         pdfMetadata: null,
         isLoading: false,
@@ -87,4 +89,4 @@ export const usePdfLoader = (options: UsePdfLoaderOptions = {}) => {
     closePdf,
     reloadPdf,
   };
-}; 
+};

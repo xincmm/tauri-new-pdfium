@@ -1,16 +1,8 @@
-import { useEffect } from 'react';
-import { 
-  PdfMetadata, 
-  ViewState, 
-  PageLayout
-} from '@/PdfViewer/types/pdf';
-import {
-  TILE_SIZE,
-  HIGH_RES_LOAD_DELAY,
-  PRELOAD_PAGES_AHEAD 
-} from '@/PdfViewer/config';
-import { usePdfState } from '@/hooks/usePdfState';
-import { getVisiblePages, getExpandedVisiblePages } from '@/PdfViewer/utils/pdfLayout';
+import { useEffect } from "react";
+import { PdfMetadata, ViewState, PageLayout } from "@/PdfViewer/types/pdf";
+import { TILE_SIZE, HIGH_RES_LOAD_DELAY, PRELOAD_PAGES_AHEAD } from "@/PdfViewer/config";
+import { usePdfState } from "@/hooks/usePdfState";
+import { getVisiblePages, getExpandedVisiblePages } from "@/PdfViewer/utils/pdfLayout";
 // 生成瓦片缓存键
 const generateTileKey = (tileInfo: { id: string; page: number; scale: number; tx: number; ty: number }): string => {
   return `${tileInfo.id}_${tileInfo.page}_${tileInfo.scale}_${tileInfo.tx}_${tileInfo.ty}`;
@@ -23,8 +15,8 @@ interface UseTileLoaderProps {
   viewState: ViewState;
   lastScrollY: number;
   pageLayouts: PageLayout[];
-  getTileState: ReturnType<typeof usePdfState>['getTileState'];
-  updateTileState: ReturnType<typeof usePdfState>['updateTileState'];
+  getTileState: ReturnType<typeof usePdfState>["getTileState"];
+  updateTileState: ReturnType<typeof usePdfState>["updateTileState"];
 }
 
 export const useTileLoader = ({
@@ -37,7 +29,6 @@ export const useTileLoader = ({
   getTileState,
   updateTileState,
 }: UseTileLoaderProps) => {
-
   // 滚动停止后触发新瓦片的加载
   useEffect(() => {
     if (!isScrolling && pdfMetadata && containerRef.current) {
@@ -50,12 +41,12 @@ export const useTileLoader = ({
           containerHeight,
           viewState.scrollY,
           lastScrollY,
-          PRELOAD_PAGES_AHEAD
+          PRELOAD_PAGES_AHEAD,
         );
-        
-        expandedVisiblePages.forEach(pageLayout => {
+
+        expandedVisiblePages.forEach((pageLayout) => {
           const { pageIndex, width: pageWidth, height: pageHeight } = pageLayout;
-          
+
           const startTileX = 0;
           const endTileX = Math.ceil(pageWidth / TILE_SIZE);
           const startTileY = 0;
@@ -72,7 +63,7 @@ export const useTileLoader = ({
               };
               const key = generateTileKey(tileInfo);
               const tileState = getTileState(key);
-              
+
               // 只对未加载且未在加载的瓦片开始加载
               if (!tileState.loaded && !tileState.loading) {
                 updateTileState(key, { loading: true });
@@ -85,15 +76,15 @@ export const useTileLoader = ({
       return () => clearTimeout(timeoutId);
     }
   }, [
-    isScrolling, 
-    pdfMetadata, 
-    containerRef, 
-    viewState.scale, 
-    viewState.scrollY, 
-    lastScrollY, 
-    pageLayouts, 
-    getTileState, 
-    updateTileState
+    isScrolling,
+    pdfMetadata,
+    containerRef,
+    viewState.scale,
+    viewState.scrollY,
+    lastScrollY,
+    pageLayouts,
+    getTileState,
+    updateTileState,
   ]);
 
   // 滚动时的低优先级预加载
@@ -103,10 +94,10 @@ export const useTileLoader = ({
       const timeoutId = setTimeout(() => {
         const containerHeight = containerRef.current!.clientHeight;
         const visiblePages = getVisiblePages(pageLayouts, containerHeight, viewState.scrollY);
-        
-        visiblePages.forEach(pageLayout => {
+
+        visiblePages.forEach((pageLayout) => {
           const { pageIndex, width: pageWidth, height: pageHeight } = pageLayout;
-          
+
           const startTileX = 0;
           const endTileX = Math.ceil(pageWidth / TILE_SIZE);
           const startTileY = 0;
@@ -123,7 +114,7 @@ export const useTileLoader = ({
               };
               const key = generateTileKey(tileInfo);
               const tileState = getTileState(key);
-              
+
               // 只对未加载且未在加载的瓦片开始加载
               if (!tileState.loaded && !tileState.loading) {
                 updateTileState(key, { loading: true });
@@ -136,13 +127,13 @@ export const useTileLoader = ({
       return () => clearTimeout(timeoutId);
     }
   }, [
-    isScrolling, 
-    pdfMetadata, 
-    containerRef, 
-    viewState.scale, 
-    viewState.scrollY, 
-    pageLayouts, 
-    getTileState, 
-    updateTileState
+    isScrolling,
+    pdfMetadata,
+    containerRef,
+    viewState.scale,
+    viewState.scrollY,
+    pageLayouts,
+    getTileState,
+    updateTileState,
   ]);
-}; 
+};

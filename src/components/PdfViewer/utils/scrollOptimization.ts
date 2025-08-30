@@ -26,66 +26,62 @@ export interface ScrollVelocity {
  * 第一道保险：画面复用（立刻有画面）
  * 将上一帧的像素整体平移，马上填满屏幕，只在新露出的边缘留下"待补"的细条带
  */
-export function scrollBlit(
-  ctx: CanvasRenderingContext2D,
-  dx: number,
-  dy: number
-): ScrollBlitResult {
+export function scrollBlit(ctx: CanvasRenderingContext2D, dx: number, dy: number): ScrollBlitResult {
   const canvas = ctx.canvas;
   const w = canvas.width;
   const h = canvas.height;
-  
+
   // 计算源区域和目标区域
   const sx = dx < 0 ? -dx : 0;
   const sy = dy < 0 ? -dy : 0;
   const sw = w - Math.abs(dx);
   const sh = h - Math.abs(dy);
-  
+
   const dirtyRects: DirtyRect[] = [];
   let blitPerformed = false;
-  
+
   // 只有在有效区域时才进行 blit
   if (sw > 0 && sh > 0) {
     // 使用临时canvas避免自引用问题
-    const tempCanvas = document.createElement('canvas');
+    const tempCanvas = document.createElement("canvas");
     tempCanvas.width = sw;
     tempCanvas.height = sh;
-    const tempCtx = tempCanvas.getContext('2d')!;
-    
+    const tempCtx = tempCanvas.getContext("2d")!;
+
     // 先将需要保留的部分复制到临时canvas
     tempCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
-    
+
     // 清空主canvas
     ctx.clearRect(0, 0, w, h);
-    
+
     // 将保留的部分绘制到新位置
     ctx.drawImage(tempCanvas, 0, 0, sw, sh, sx + dx, sy + dy, sw, sh);
-    
+
     blitPerformed = true;
-    
+
     // 计算需要补充的脏带区域
     if (dx !== 0) {
       dirtyRects.push({
         x: dx > 0 ? 0 : w + dx,
         y: 0,
         w: Math.abs(dx),
-        h: h
+        h: h,
       });
     }
-    
+
     if (dy !== 0) {
       dirtyRects.push({
         x: 0,
         y: dy > 0 ? 0 : h + dy,
         w: w,
-        h: Math.abs(dy)
+        h: Math.abs(dy),
       });
     }
   } else {
     // 如果位移太大，整个屏幕都是脏区域
     dirtyRects.push({ x: 0, y: 0, w: w, h: h });
   }
-  
+
   return { dirtyRects, blitPerformed };
 }
 
@@ -97,22 +93,22 @@ export function calculateOverscan(
   velocity: ScrollVelocity,
   tileWidth: number,
   tileHeight: number,
-  predictionTimeMs: number = 95 // 95ms 预测时间
+  predictionTimeMs: number = 95, // 95ms 预测时间
 ): OverscanConfig {
   // 防止除零错误
   const safeTileWidth = Math.max(1, tileWidth || 1);
   const safeTileHeight = Math.max(1, tileHeight || 1);
-  
+
   // 根据速度计算需要预铺的瓦片数量
   const projectedDx = Math.abs(velocity.vx || 0) * predictionTimeMs;
   const projectedDy = Math.abs(velocity.vy || 0) * predictionTimeMs;
-  
+
   const cols = Math.min(4, Math.ceil(projectedDx / safeTileWidth) + 1);
   const rows = Math.min(4, Math.ceil(projectedDy / safeTileHeight) + 1);
-  
+
   return {
     extraCols: Math.max(1, isNaN(cols) ? 1 : cols),
-    extraRows: Math.max(1, isNaN(rows) ? 1 : rows)
+    extraRows: Math.max(1, isNaN(rows) ? 1 : rows),
   };
 }
 
@@ -122,18 +118,18 @@ export function calculateOverscan(
 export function calculateScrollVelocity(
   currentScrollY: number,
   lastScrollY: number,
-  deltaTime: number
+  deltaTime: number,
 ): ScrollVelocity {
   if (deltaTime <= 0 || isNaN(deltaTime)) {
     return { vx: 0, vy: 0 };
   }
-  
+
   const deltaY = (currentScrollY || 0) - (lastScrollY || 0);
   const velocity = deltaY / deltaTime;
-  
+
   return {
     vx: 0, // PDF查看器主要是垂直滚动
-    vy: isNaN(velocity) ? 0 : velocity
+    vy: isNaN(velocity) ? 0 : velocity,
   };
 }
 
@@ -145,7 +141,7 @@ export function canShowWithoutUpscaling(
   srcWidth: number,
   srcHeight: number,
   needWidth: number,
-  needHeight: number
+  needHeight: number,
 ): boolean {
   return srcWidth >= needWidth && srcHeight >= needHeight;
 }
@@ -156,7 +152,7 @@ export function canShowWithoutUpscaling(
 export function isLargeJump(
   deltaY: number,
   viewportHeight: number,
-  threshold: number = 1.0 // 超过一屏的比例
+  threshold: number = 1.0, // 超过一屏的比例
 ): boolean {
   return Math.abs(deltaY) > viewportHeight * threshold;
 }
@@ -168,12 +164,12 @@ export function calculateTilePriority(
   tileY: number,
   tileHeight: number,
   viewportTop: number,
-  viewportHeight: number
+  viewportHeight: number,
 ): number {
   const tileCenter = tileY + tileHeight / 2;
   const viewportCenter = viewportTop + viewportHeight / 2;
   const distance = Math.abs(tileCenter - viewportCenter);
-  
+
   // 距离越近，优先级越高（数值越小）
   return distance;
 }
@@ -197,22 +193,17 @@ export function isTileInOverscanArea(
   viewportTop: number,
   viewportWidth: number,
   viewportHeight: number,
-  overscan: OverscanConfig
+  overscan: OverscanConfig,
 ): boolean {
   const expandedLeft = viewportLeft - overscan.extraCols * tileWidth;
   const expandedTop = viewportTop - overscan.extraRows * tileHeight;
   const expandedRight = viewportLeft + viewportWidth + overscan.extraCols * tileWidth;
   const expandedBottom = viewportTop + viewportHeight + overscan.extraRows * tileHeight;
-  
+
   const tileRight = tileX + tileWidth;
   const tileBottom = tileY + tileHeight;
-  
-  return (
-    tileX < expandedRight &&
-    tileRight > expandedLeft &&
-    tileY < expandedBottom &&
-    tileBottom > expandedTop
-  );
+
+  return tileX < expandedRight && tileRight > expandedLeft && tileY < expandedBottom && tileBottom > expandedTop;
 }
 
 /**
@@ -221,14 +212,14 @@ export function isTileInOverscanArea(
 export function calculateUnreadyAreaRatio(
   viewportWidth: number,
   viewportHeight: number,
-  unreadyRects: DirtyRect[]
+  unreadyRects: DirtyRect[],
 ): number {
   const totalViewportArea = viewportWidth * viewportHeight;
   if (totalViewportArea === 0) return 0;
-  
+
   const unreadyArea = unreadyRects.reduce((sum, rect) => {
     return sum + rect.w * rect.h;
   }, 0);
-  
+
   return unreadyArea / totalViewportArea;
-} 
+}

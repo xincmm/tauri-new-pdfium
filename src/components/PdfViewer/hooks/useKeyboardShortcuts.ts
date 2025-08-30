@@ -1,15 +1,6 @@
-import { useEffect } from 'react';
-import { 
-  PdfMetadata, 
-  ViewState, 
-  PageLayout
-} from '@/PdfViewer/types/pdf';
-import {
-  MIN_SCALE,
-  MAX_SCALE,
-  PAGE_MARGIN,
-  DEFAULT_SCALE
-} from '@/PdfViewer/config';
+import { useEffect } from "react";
+import { PdfMetadata, ViewState, PageLayout } from "@/PdfViewer/types/pdf";
+import { MIN_SCALE, MAX_SCALE, PAGE_MARGIN, DEFAULT_SCALE } from "@/PdfViewer/config";
 
 interface UseKeyboardShortcutsProps {
   pdfMetadata: PdfMetadata | null;
@@ -28,7 +19,6 @@ export const useKeyboardShortcuts = ({
   containerRef,
   pageLayouts,
 }: UseKeyboardShortcutsProps) => {
-
   // 跳转到指定页面
   const goToPage = (pageIndex: number) => {
     if (!pdfMetadata || !containerRef.current) return;
@@ -36,7 +26,7 @@ export const useKeyboardShortcuts = ({
     if (targetLayout) {
       const targetScrollY = targetLayout.y - PAGE_MARGIN;
       containerRef.current.scrollTop = targetScrollY;
-      setViewState(prev => ({
+      setViewState((prev) => ({
         ...prev,
         scrollY: targetScrollY,
       }));
@@ -60,44 +50,44 @@ export const useKeyboardShortcuts = ({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!pdfMetadata) return;
-      
+
       switch (e.key) {
-        case 'Home':
+        case "Home":
           e.preventDefault();
           goToPage(0);
           break;
-        case 'End':
+        case "End":
           e.preventDefault();
           goToPage(pdfMetadata.total_pages - 1);
           break;
-        case 'PageUp':
+        case "PageUp":
           e.preventDefault();
           goToPage(Math.max(0, currentVisiblePage - 1));
           break;
-        case 'PageDown':
+        case "PageDown":
           e.preventDefault();
           goToPage(Math.min(pdfMetadata.total_pages - 1, currentVisiblePage + 1));
           break;
-        case '+':
-        case '=':
+        case "+":
+        case "=":
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
-            setViewState(prev => ({ 
-              ...prev, 
-              scale: Math.min(MAX_SCALE, prev.scale * 1.25) 
+            setViewState((prev) => ({
+              ...prev,
+              scale: Math.min(MAX_SCALE, prev.scale * 1.25),
             }));
           }
           break;
-        case '-':
+        case "-":
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
-            setViewState(prev => ({ 
-              ...prev, 
-              scale: Math.max(MIN_SCALE, prev.scale * 0.8) 
+            setViewState((prev) => ({
+              ...prev,
+              scale: Math.max(MIN_SCALE, prev.scale * 0.8),
             }));
           }
           break;
-        case '0':
+        case "0":
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
             resetView();
@@ -106,7 +96,7 @@ export const useKeyboardShortcuts = ({
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, [pdfMetadata, currentVisiblePage, pageLayouts, containerRef, setViewState, setCurrentVisiblePage]);
-}; 
+};

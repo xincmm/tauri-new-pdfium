@@ -30,7 +30,7 @@ class PerformanceMonitor {
   // 记录瓦片加载性能
   recordTileLoad(metrics: TileLoadMetrics) {
     this.metrics.push(metrics);
-    
+
     // 保持数组大小在限制内
     if (this.metrics.length > this.maxMetrics) {
       this.metrics = this.metrics.slice(-this.maxMetrics);
@@ -47,34 +47,34 @@ class PerformanceMonitor {
       raster: 0,
       pack: 0,
       encode: 0,
-      total: 0
+      total: 0,
     };
 
     // 解析格式: "queue;dur=0.12, setup;dur=1.23, raster;dur=100.00, pack;dur=2.34, encode;dur=50.12, total;dur=153.69"
-    const entries = serverTimingHeader.split(',');
+    const entries = serverTimingHeader.split(",");
     for (const entry of entries) {
       const trimmed = entry.trim();
-      const [name, durPart] = trimmed.split(';dur=');
+      const [name, durPart] = trimmed.split(";dur=");
       if (name && durPart) {
         const duration = parseFloat(durPart);
         if (!isNaN(duration)) {
           switch (name.trim()) {
-            case 'queue':
+            case "queue":
               timing.queue = duration;
               break;
-            case 'setup':
+            case "setup":
               timing.setup = duration;
               break;
-            case 'raster':
+            case "raster":
               timing.raster = duration;
               break;
-            case 'pack':
+            case "pack":
               timing.pack = duration;
               break;
-            case 'encode':
+            case "encode":
               timing.encode = duration;
               break;
-            case 'total':
+            case "total":
               timing.total = duration;
               break;
           }
@@ -93,7 +93,7 @@ class PerformanceMonitor {
     if (match) {
       return {
         width: parseInt(match[1]),
-        height: parseInt(match[2])
+        height: parseInt(match[2]),
       };
     }
     return undefined;
@@ -102,7 +102,7 @@ class PerformanceMonitor {
   // 获取最近的性能统计
   getRecentStats(count = 10) {
     const recent = this.metrics.slice(-count);
-    
+
     if (recent.length === 0) {
       return {
         count: 0,
@@ -115,23 +115,26 @@ class PerformanceMonitor {
       };
     }
 
-    const sum = recent.reduce((acc, metric) => ({
-      networkTime: acc.networkTime + metric.networkTime,
-      blobTime: acc.blobTime + metric.blobTime,
-      bitmapTime: acc.bitmapTime + metric.bitmapTime,
-      totalFrontendTime: acc.totalFrontendTime + metric.totalFrontendTime,
-      serverTotal: acc.serverTotal + (metric.serverTiming?.total || 0),
-      serverRender: acc.serverRender + (metric.serverTiming?.raster || 0),
-      serverEncode: acc.serverEncode + (metric.serverTiming?.encode || 0),
-    }), {
-      networkTime: 0,
-      blobTime: 0,
-      bitmapTime: 0,
-      totalFrontendTime: 0,
-      serverTotal: 0,
-      serverRender: 0,
-      serverEncode: 0,
-    });
+    const sum = recent.reduce(
+      (acc, metric) => ({
+        networkTime: acc.networkTime + metric.networkTime,
+        blobTime: acc.blobTime + metric.blobTime,
+        bitmapTime: acc.bitmapTime + metric.bitmapTime,
+        totalFrontendTime: acc.totalFrontendTime + metric.totalFrontendTime,
+        serverTotal: acc.serverTotal + (metric.serverTiming?.total || 0),
+        serverRender: acc.serverRender + (metric.serverTiming?.raster || 0),
+        serverEncode: acc.serverEncode + (metric.serverTiming?.encode || 0),
+      }),
+      {
+        networkTime: 0,
+        blobTime: 0,
+        bitmapTime: 0,
+        totalFrontendTime: 0,
+        serverTotal: 0,
+        serverRender: 0,
+        serverEncode: 0,
+      },
+    );
 
     return {
       count: recent.length,
@@ -148,21 +151,21 @@ class PerformanceMonitor {
   // 获取性能瓶颈分析
   getBottleneckAnalysis() {
     const stats = this.getRecentStats(20);
-    
+
     const bottlenecks = [];
-    
+
     if (stats.avgNetworkTime > 100) {
       bottlenecks.push(`网络延迟高 (${stats.avgNetworkTime.toFixed(1)}ms)`);
     }
-    
+
     if (stats.avgServerRender > 200) {
       bottlenecks.push(`服务端渲染慢 (${stats.avgServerRender.toFixed(1)}ms)`);
     }
-    
+
     if (stats.avgBitmapTime > 50) {
       bottlenecks.push(`ImageBitmap创建慢 (${stats.avgBitmapTime.toFixed(1)}ms)`);
     }
-    
+
     if (stats.avgBlobTime > 20) {
       bottlenecks.push(`Blob转换慢 (${stats.avgBlobTime.toFixed(1)}ms)`);
     }
@@ -170,7 +173,7 @@ class PerformanceMonitor {
     return {
       stats,
       bottlenecks,
-      recommendation: this.getRecommendation(stats, bottlenecks)
+      recommendation: this.getRecommendation(stats, bottlenecks),
     };
   }
 
@@ -197,4 +200,4 @@ class PerformanceMonitor {
 }
 
 // 全局性能监控器实例
-export const performanceMonitor = new PerformanceMonitor(); 
+export const performanceMonitor = new PerformanceMonitor();

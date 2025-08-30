@@ -1,12 +1,12 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { useScrollHandler } from './hooks/useScrollHandler';
-import { useZoomController } from './hooks/useZoomController';
-import { useViewportManager } from './hooks/useViewportManager';
-import { useCanvasRenderer } from './hooks/useCanvasRenderer';
-import { usePdfLoader } from './hooks/usePdfLoader';
-import { ToolbarPlugin } from './plugins/ToolbarPlugin';
-import { ViewportPlugin } from './plugins/ViewportPlugin';
-import { renderManager } from './core/RenderManager';
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import { useScrollHandler } from "./hooks/useScrollHandler";
+import { useZoomController } from "./hooks/useZoomController";
+import { useViewportManager } from "./hooks/useViewportManager";
+import { useCanvasRenderer } from "./hooks/useCanvasRenderer";
+import { usePdfLoader } from "./hooks/usePdfLoader";
+import { ToolbarPlugin } from "./plugins/ToolbarPlugin";
+import { ViewportPlugin } from "./plugins/ViewportPlugin";
+import { renderManager } from "./core/RenderManager";
 
 export const SingleCanvasViewer: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -24,12 +24,12 @@ export const SingleCanvasViewer: React.FC = () => {
   const { pdfMetadata, isLoading, handleOpenPdf } = usePdfLoader({
     onClearRender: () => {
       renderManager.clearAllPages();
-    }
+    },
   });
 
-    const { handleZoom, applyTargetScroll } = useZoomController({
+  const { handleZoom, applyTargetScroll } = useZoomController({
     onZoomChange: (scale) => {
-      setViewState(prev => ({ ...prev, scale }));
+      setViewState((prev) => ({ ...prev, scale }));
       renderManager.clearPagesExceptScale(scale);
       renderManager.setEnabled(false);
       requestAnimationFrame(() => {
@@ -37,16 +37,16 @@ export const SingleCanvasViewer: React.FC = () => {
         renderManager.bumpEpoch();
       });
     },
-    onInteractionDetected: () => setHasInteracted(true)
+    onInteractionDetected: () => setHasInteracted(true),
   });
 
   // 滚动处理 - 简化回调，避免循环依赖
   const { scrollState, handleScroll, getDynamicPreloadAhead, isSlowScrolling, lastScrollYRef } = useScrollHandler({
     onScrollChange: (state) => {
-      setViewState(prev => ({ 
-        ...prev, 
-        scrollX: state.scrollX, 
-        scrollY: state.scrollY 
+      setViewState((prev) => ({
+        ...prev,
+        scrollX: state.scrollX,
+        scrollY: state.scrollY,
       }));
 
       // 滚动时禁用渲染队列
@@ -59,7 +59,7 @@ export const SingleCanvasViewer: React.FC = () => {
         renderManager.bumpEpoch();
       }
     },
-    onInteractionDetected: () => setHasInteracted(true)
+    onInteractionDetected: () => setHasInteracted(true),
   });
 
   // 视口管理
@@ -71,7 +71,7 @@ export const SingleCanvasViewer: React.FC = () => {
     hasInteracted,
     getDynamicPreloadAhead,
     scrollSpeedPxPerMs: scrollState.scrollSpeedPxPerMs,
-    lastScrollY: lastScrollYRef.current
+    lastScrollY: lastScrollYRef.current,
   });
 
   // Canvas渲染器
@@ -82,21 +82,21 @@ export const SingleCanvasViewer: React.FC = () => {
     scrollY: viewState.scrollY,
     scrollX: viewState.scrollX,
     maxPageWidth: viewportManager.viewportState.maxPageWidth,
-    getPageDrawPosition: viewportManager.getPageDrawPosition
+    getPageDrawPosition: viewportManager.getPageDrawPosition,
   });
 
   // 设置渲染管理器的回调
   useEffect(() => {
     renderManager.setRenderCallback(async (pageIndex, layout) => {
       // 在RenderManager中记录开始状态
-      renderManager.setPageRenderInfo(pageIndex, { 
-        isLoading: true, 
-        scale: viewState.scale 
+      renderManager.setPageRenderInfo(pageIndex, {
+        isLoading: true,
+        scale: viewState.scale,
       });
-      
+
       // 实际渲染
       await canvasRenderer.updatePageRender(pageIndex, layout);
-      
+
       // 获取渲染结果并同步到RenderManager
       const canvasInfo = canvasRenderer.pageRenderMapRef.current.get(pageIndex);
       if (canvasInfo) {
@@ -104,27 +104,27 @@ export const SingleCanvasViewer: React.FC = () => {
           imageBitmap: canvasInfo.imageBitmap,
           isLoading: canvasInfo.isLoading,
           lastRendered: canvasInfo.lastRendered,
-          scale: viewState.scale
+          scale: viewState.scale,
         });
       }
     });
-    
+
     renderManager.setCompleteCallback(() => {
       // 渲染完成后可以进行额外处理
-      console.log('Render queue completed');
+      console.log("Render queue completed");
     });
   }, [canvasRenderer.updatePageRender, viewState.scale]);
 
   // 处理滚动时的立即重绘（移到单独的effect中）
   useEffect(() => {
     if (scrollState.isScrollIdle) return;
-    
+
     if (canvasRenderer.drawToCanvas && viewportManager.visibleLayouts) {
       requestAnimationFrame(() => {
         canvasRenderer.drawToCanvas(
           canvasRef,
           viewportManager.visibleLayouts,
-          viewportManager.viewportState.containerWidth
+          viewportManager.viewportState.containerWidth,
         );
       });
     }
@@ -132,20 +132,20 @@ export const SingleCanvasViewer: React.FC = () => {
     scrollState.isScrollIdle,
     canvasRenderer.drawToCanvas,
     viewportManager.visibleLayouts,
-    viewportManager.viewportState.containerWidth
+    viewportManager.viewportState.containerWidth,
   ]);
 
   // 处理空闲时的渲染队列
   useEffect(() => {
     if (!scrollState.isScrollIdle || !pdfMetadata) return;
-    
+
     // 确保有可见布局且渲染管理器已启用
     if (viewportManager.visibleLayouts && viewportManager.visibleLayouts.length > 0) {
       renderManager.enqueueIdleTasks(
         viewportManager.visibleLayouts,
         viewportManager.viewportState.containerHeight,
         viewState.scrollY,
-        viewState.scale
+        viewState.scale,
       );
     }
   }, [
@@ -154,7 +154,7 @@ export const SingleCanvasViewer: React.FC = () => {
     viewportManager.visibleLayouts,
     viewportManager.viewportState.containerHeight,
     viewState.scrollY,
-    viewState.scale
+    viewState.scale,
   ]);
 
   // 处理滚动中的前向预取
@@ -165,7 +165,7 @@ export const SingleCanvasViewer: React.FC = () => {
       viewportManager.visibleLayouts,
       scrollState.scrollDirection,
       viewportManager.pageLayouts,
-      viewState.scale
+      viewState.scale,
     );
   }, [
     scrollState.isScrollIdle,
@@ -174,20 +174,20 @@ export const SingleCanvasViewer: React.FC = () => {
     viewportManager.visibleLayouts,
     viewportManager.pageLayouts,
     viewState.scale,
-    isSlowScrolling
+    isSlowScrolling,
   ]);
 
   // 自动居中处理
   useEffect(() => {
     viewportManager.autoCenter(hasInteracted, (x, y) => {
-      setViewState(prev => ({ ...prev, scrollX: x, scrollY: y }));
+      setViewState((prev) => ({ ...prev, scrollX: x, scrollY: y }));
     });
   }, [viewportManager.viewportState.maxPageWidth, viewState.scale, hasInteracted]);
 
   // 应用缩放后的滚动位置
   useEffect(() => {
     applyTargetScroll(containerRef, (x, y) => {
-      setViewState(prev => ({ ...prev, scrollX: x, scrollY: y }));
+      setViewState((prev) => ({ ...prev, scrollX: x, scrollY: y }));
     });
   }, [viewState.scale, applyTargetScroll]);
 
@@ -197,26 +197,26 @@ export const SingleCanvasViewer: React.FC = () => {
       canvasRenderer.drawToCanvas(
         canvasRef,
         viewportManager.visibleLayouts,
-        viewportManager.viewportState.containerWidth
+        viewportManager.viewportState.containerWidth,
       );
     }
   }, [
     canvasRenderer.drawToCanvas,
     canvasRenderer.renderVersion,
     viewportManager.visibleLayouts,
-    viewportManager.viewportState.containerWidth
+    viewportManager.viewportState.containerWidth,
   ]);
 
   const handleZoomIn = useCallback(() => {
-    handleZoom(0.20, containerRef, viewState.scrollX, viewState.scrollY);
+    handleZoom(0.2, containerRef, viewState.scrollX, viewState.scrollY);
   }, [handleZoom, viewState.scrollX, viewState.scrollY]);
 
   const handleZoomOut = useCallback(() => {
-    handleZoom(-0.20, containerRef, viewState.scrollX, viewState.scrollY);
+    handleZoom(-0.2, containerRef, viewState.scrollX, viewState.scrollY);
   }, [handleZoom, viewState.scrollX, viewState.scrollY]);
 
   return (
-    <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column" }}>
       <ToolbarPlugin
         pdfMetadata={pdfMetadata}
         isLoading={isLoading}
@@ -237,4 +237,4 @@ export const SingleCanvasViewer: React.FC = () => {
       />
     </div>
   );
-}; 
+};

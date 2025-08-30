@@ -1,9 +1,9 @@
 // PDF 文档管理器 - 封装 Tauri 命令系统
-import { invoke } from '@tauri-apps/api/core';
-import { PDFiumCore, ReactPDF } from '@/PdfViewer/types/pdf-core';
+import { invoke } from "@tauri-apps/api/core";
+import { PDFiumCore, ReactPDF } from "@/PdfViewer/types/pdf-core";
 
 // 兼容现有类型的适配器
-import { PdfMetadata, PageTextLayout } from '@/PdfViewer/types/pdf';
+import { PdfMetadata, PageTextLayout } from "@/PdfViewer/types/pdf";
 
 /**
  * PDF 文档管理器
@@ -17,7 +17,7 @@ export class DocumentManager implements ReactPDF.DocumentManager {
   async initialize(): Promise<void> {
     // 初始化 PDFium 库（如果需要）
     // 目前直接使用现有的 Tauri 命令
-    console.log('DocumentManager initialized');
+    console.log("DocumentManager initialized");
   }
 
   async destroy(): Promise<void> {
@@ -33,11 +33,11 @@ export class DocumentManager implements ReactPDF.DocumentManager {
 
   // ============= 文档操作 =============
   async openFromUrl(_url: string): Promise<PDFiumCore.DocumentHandle> {
-    throw new Error('URL loading not implemented yet');
+    throw new Error("URL loading not implemented yet");
   }
 
   async openFromBuffer(_buffer: ArrayBuffer): Promise<PDFiumCore.DocumentHandle> {
-    throw new Error('Buffer loading not implemented yet');
+    throw new Error("Buffer loading not implemented yet");
   }
 
   /**
@@ -45,23 +45,23 @@ export class DocumentManager implements ReactPDF.DocumentManager {
    */
   async openFromPath(path: string): Promise<PDFiumCore.DocumentHandle> {
     try {
-        const metadata = await invoke<PdfMetadata>('load_pdf', { filePath: path });
-        console.log('🔍 DocumentManager接收到元数据:', metadata);
-        
-        const handle: PDFiumCore.DocumentHandle = {
+      const metadata = await invoke<PdfMetadata>("load_pdf", { filePath: path });
+      console.log("🔍 DocumentManager接收到元数据:", metadata);
+
+      const handle: PDFiumCore.DocumentHandle = {
         id: metadata.id,
         handle: 0, // 暂时不需要底层handle
         metadata: {
           pageCount: metadata.total_pages,
           pageDimensions: metadata.page_dimension_templates.map(([width, height]) => ({ width, height })),
-          version: '1.0', // 暂时硬编码
-        }
+          version: "1.0", // 暂时硬编码
+        },
       };
 
       this.documents.set(metadata.id, handle);
       return handle;
     } catch (error) {
-      throw this.wrapError(error, 'Failed to open PDF from path');
+      throw this.wrapError(error, "Failed to open PDF from path");
     }
   }
 
@@ -96,7 +96,7 @@ export class DocumentManager implements ReactPDF.DocumentManager {
     }
 
     this.documents.delete(documentId);
-    
+
     // 这里可以调用后端的清理命令（如果有的话）
     console.log(`Document ${documentId} closed and resources cleaned up`);
   }
@@ -135,7 +135,7 @@ export class DocumentManager implements ReactPDF.DocumentManager {
   async closePage(pageHandle: PDFiumCore.PageHandle): Promise<void> {
     const pageKey = `${pageHandle.documentId}:${pageHandle.pageIndex}`;
     this.pages.delete(pageKey);
-    
+
     // 同时清理相关的文本页面
     this.textPages.delete(pageKey);
   }
@@ -150,9 +150,9 @@ export class DocumentManager implements ReactPDF.DocumentManager {
 
     try {
       // 使用现有的 Tauri 命令获取文本布局
-      const textLayout = await invoke<PageTextLayout>('get_page_text_layout', {
+      const textLayout = await invoke<PageTextLayout>("get_page_text_layout", {
         id: pageHandle.documentId,
-        page: pageHandle.pageIndex
+        page: pageHandle.pageIndex,
       });
 
       const textPageHandle: PDFiumCore.TextPageHandle = {
@@ -168,23 +168,19 @@ export class DocumentManager implements ReactPDF.DocumentManager {
     }
   }
 
-  async getTextInRange(
-    textPageHandle: PDFiumCore.TextPageHandle,
-    startIndex: number,
-    count: number
-  ): Promise<string> {
+  async getTextInRange(textPageHandle: PDFiumCore.TextPageHandle, startIndex: number, count: number): Promise<string> {
     try {
       // 重新获取文本布局（或从缓存获取）
-      const textLayout = await invoke<PageTextLayout>('get_page_text_layout', {
+      const textLayout = await invoke<PageTextLayout>("get_page_text_layout", {
         id: textPageHandle.pageHandle.documentId,
-        page: textPageHandle.pageHandle.pageIndex
+        page: textPageHandle.pageHandle.pageIndex,
       });
 
       const endIndex = Math.min(startIndex + count, textLayout.chars.length);
       const chars = textLayout.chars.slice(startIndex, endIndex);
-      return chars.map(c => c.ch).join('');
+      return chars.map((c) => c.ch).join("");
     } catch (error) {
-      throw this.wrapError(error, 'Failed to get text in range');
+      throw this.wrapError(error, "Failed to get text in range");
     }
   }
 
@@ -194,21 +190,18 @@ export class DocumentManager implements ReactPDF.DocumentManager {
   }
 
   // ============= 渲染操作 =============
-  async renderPage(
-    _pageHandle: PDFiumCore.PageHandle,
-    _options: PDFiumCore.RenderOptions
-  ): Promise<ImageBitmap> {
+  async renderPage(_pageHandle: PDFiumCore.PageHandle, _options: PDFiumCore.RenderOptions): Promise<ImageBitmap> {
     // 这里需要实现新的渲染命令，目前抛出错误
-    throw new Error('Direct page rendering not implemented - use existing tile system');
+    throw new Error("Direct page rendering not implemented - use existing tile system");
   }
 
   async renderPageRect(
     _pageHandle: PDFiumCore.PageHandle,
     _rect: DOMRect,
-    _options: PDFiumCore.RenderOptions
+    _options: PDFiumCore.RenderOptions,
   ): Promise<ImageBitmap> {
     // 这里需要实现矩形区域渲染，目前抛出错误
-    throw new Error('Page rect rendering not implemented - use existing tile system');
+    throw new Error("Page rect rendering not implemented - use existing tile system");
   }
 
   // ============= 兼容性方法 =============
@@ -222,8 +215,10 @@ export class DocumentManager implements ReactPDF.DocumentManager {
     return {
       id: document.id,
       total_pages: document.metadata.pageCount,
-      page_dimension_templates: document.metadata.pageDimensions.map(dim => [dim.width, dim.height] as [number, number]),
-      page_template_indices: Array.from({ length: document.metadata.pageCount }, () => 0) // 简化版，假设所有页面使用第一个模板
+      page_dimension_templates: document.metadata.pageDimensions.map(
+        (dim) => [dim.width, dim.height] as [number, number],
+      ),
+      page_template_indices: Array.from({ length: document.metadata.pageCount }, () => 0), // 简化版，假设所有页面使用第一个模板
     };
   }
 
@@ -245,11 +240,11 @@ export class DocumentManager implements ReactPDF.DocumentManager {
   private wrapError(error: any, context: string): PDFiumCore.PDFError {
     return {
       code: PDFiumCore.ErrorCode.UNKNOWN,
-      message: error.message || 'Unknown error',
-      details: { context, originalError: error }
+      message: error.message || "Unknown error",
+      details: { context, originalError: error },
     };
   }
 }
 
 // 全局单例实例
-export const documentManager = new DocumentManager(); 
+export const documentManager = new DocumentManager();

@@ -56,16 +56,16 @@ export namespace PDFiumCore {
   }
 
   export enum RenderFlags {
-    ANNOT = 1,       // 渲染注释
-    LCD_TEXT = 2,    // LCD文本优化
+    ANNOT = 1, // 渲染注释
+    LCD_TEXT = 2, // LCD文本优化
     NO_NATIVETEXT = 4, // 不使用原生文本
-    GRAYSCALE = 8,   // 灰度渲染
+    GRAYSCALE = 8, // 灰度渲染
     DEBUG_INFO = 16, // 调试信息
-    NO_CATCH = 32,   // 不捕获异常
+    NO_CATCH = 32, // 不捕获异常
     RENDER_LIMITEDIMAGECACHE = 64, // 限制图片缓存
-    RENDER_FORCEHALFTONE = 128,    // 强制半色调
-    PRINTING = 256,  // 打印模式
-    REVERSE_BYTE_ORDER = 512,      // 反转字节序
+    RENDER_FORCEHALFTONE = 128, // 强制半色调
+    PRINTING = 256, // 打印模式
+    REVERSE_BYTE_ORDER = 512, // 反转字节序
   }
 
   // 错误处理
@@ -99,20 +99,24 @@ export namespace ReactPDF {
     openFromPath(path: string): Promise<PDFiumCore.DocumentHandle>; // 兼容现有系统
     close(documentId: string): Promise<void>;
     destroy(): Promise<void>;
-    
+
     // 页面操作
     loadPage(documentId: string, pageIndex: number): Promise<PDFiumCore.PageHandle>;
     closePage(pageHandle: PDFiumCore.PageHandle): Promise<void>;
-    
+
     // 文本操作
     loadTextPage(pageHandle: PDFiumCore.PageHandle): Promise<PDFiumCore.TextPageHandle>;
     getTextInRange(textPageHandle: PDFiumCore.TextPageHandle, startIndex: number, count: number): Promise<string>;
     closeTextPage(textPageHandle: PDFiumCore.TextPageHandle): Promise<void>;
-    
+
     // 渲染操作
     renderPage(pageHandle: PDFiumCore.PageHandle, options: PDFiumCore.RenderOptions): Promise<ImageBitmap>;
-    renderPageRect(pageHandle: PDFiumCore.PageHandle, rect: DOMRect, options: PDFiumCore.RenderOptions): Promise<ImageBitmap>;
-    
+    renderPageRect(
+      pageHandle: PDFiumCore.PageHandle,
+      rect: DOMRect,
+      options: PDFiumCore.RenderOptions,
+    ): Promise<ImageBitmap>;
+
     // 兼容性方法
     getLoadedDocuments(): string[];
     isDocumentLoaded(documentId: string): boolean;
@@ -152,14 +156,14 @@ export namespace ReactPDF {
 
   // 预定义插件接口
   export interface TextSelectionPlugin extends Plugin {
-    name: 'text-selection';
+    name: "text-selection";
     selectText(startPage: number, startChar: number, endPage: number, endChar: number): Promise<string>;
     clearSelection(): void;
     getSelection(): TextSelection | null;
   }
 
   export interface AnnotationPlugin extends Plugin {
-    name: 'annotations';
+    name: "annotations";
     getAllAnnotations(documentId: string): Promise<Annotation[]>;
     getPageAnnotations(documentId: string, pageIndex: number): Promise<Annotation[]>;
     createAnnotation(documentId: string, pageIndex: number, annotation: AnnotationData): Promise<Annotation>;
@@ -168,7 +172,7 @@ export namespace ReactPDF {
   }
 
   export interface SearchPlugin extends Plugin {
-    name: 'search';
+    name: "search";
     search(documentId: string, query: string, options?: SearchOptions): Promise<SearchResult[]>;
     highlightResults(results: SearchResult[]): void;
     clearHighlights(): void;
@@ -194,15 +198,15 @@ export namespace ReactPDF {
   }
 
   export enum AnnotationType {
-    TEXT = 'text',
-    HIGHLIGHT = 'highlight',
-    UNDERLINE = 'underline',
-    STRIKEOUT = 'strikeout',
-    SQUIGGLY = 'squiggly',
-    NOTE = 'note',
-    FREETEXT = 'freetext',
-    LINK = 'link',
-    WIDGET = 'widget',
+    TEXT = "text",
+    HIGHLIGHT = "highlight",
+    UNDERLINE = "underline",
+    STRIKEOUT = "strikeout",
+    SQUIGGLY = "squiggly",
+    NOTE = "note",
+    FREETEXT = "freetext",
+    LINK = "link",
+    WIDGET = "widget",
   }
 
   export interface AnnotationData {
@@ -278,4 +282,4 @@ export namespace PDFEvents {
     error: PDFiumCore.PDFError;
     context?: string;
   }
-} 
+}

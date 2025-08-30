@@ -31,7 +31,7 @@ export class RenderManager {
   private enabled = true;
   private currentEpoch = 0;
   private config: RenderQueueConfig;
-  
+
   // 回调函数
   private onRenderPage?: (pageIndex: number, layout: any) => Promise<void>;
   private onRenderComplete?: () => void;
@@ -41,7 +41,7 @@ export class RenderManager {
       maxConcurrency: 1,
       idleEnqueueLimit: 4,
       slowPrefetchPages: 3,
-      ...config
+      ...config,
     };
   }
 
@@ -79,7 +79,7 @@ export class RenderManager {
       priority: 0,
       scale: 1,
       ...existing,
-      ...info
+      ...info,
     };
     this.pageRenderMap.set(pageIndex, updated);
   }
@@ -115,16 +115,16 @@ export class RenderManager {
   /**
    * 添加渲染任务
    */
-  enqueueRenderTask(task: Omit<RenderTask, 'epoch'>) {
+  enqueueRenderTask(task: Omit<RenderTask, "epoch">) {
     if (!this.enabled) return;
 
     const fullTask: RenderTask = {
       ...task,
-      epoch: this.currentEpoch
+      epoch: this.currentEpoch,
     };
 
     // 检查是否已存在相同页面的任务
-    const existingIndex = this.renderTasks.findIndex(t => t.pageIndex === task.pageIndex);
+    const existingIndex = this.renderTasks.findIndex((t) => t.pageIndex === task.pageIndex);
     if (existingIndex !== -1) {
       // 更新现有任务的优先级和时代
       this.renderTasks[existingIndex] = fullTask;
@@ -186,7 +186,7 @@ export class RenderManager {
    */
   clearPagesExceptScale(currentScale: number, tolerance = 0.01) {
     const pagesToDelete: number[] = [];
-    
+
     for (const [pageIndex, info] of this.pageRenderMap.entries()) {
       if (Math.abs(info.scale - currentScale) > tolerance) {
         pagesToDelete.push(pageIndex);
@@ -201,34 +201,29 @@ export class RenderManager {
   /**
    * 批量添加空闲时渲染任务
    */
-  enqueueIdleTasks(
-    visibleLayouts: any[],
-    containerHeight: number,
-    scrollY: number,
-    scale: number
-  ) {
+  enqueueIdleTasks(visibleLayouts: any[], containerHeight: number, scrollY: number, scale: number) {
     if (!this.enabled) return;
 
     // 按视口中心距离排序
     const viewportCenter = scrollY + containerHeight / 2;
     const candidates = visibleLayouts
-      .map(layout => ({
+      .map((layout) => ({
         layout,
-        distance: Math.abs((layout.y + 40 + layout.height / 2) - viewportCenter),
+        distance: Math.abs(layout.y + 40 + layout.height / 2 - viewportCenter),
       }))
       .sort((a, b) => a.distance - b.distance);
 
     let count = 0;
     for (const { layout } of candidates) {
       if (count >= this.config.idleEnqueueLimit) break;
-      
+
       const pageInfo = this.getPageRenderInfo(layout.pageIndex);
       if (!pageInfo || (!pageInfo.imageBitmap && !pageInfo.isLoading)) {
         this.enqueueRenderTask({
           pageIndex: layout.pageIndex,
           layout,
           priority: count,
-          scale
+          scale,
         });
         count++;
       }
@@ -238,15 +233,10 @@ export class RenderManager {
   /**
    * 添加前向预取任务（慢速滚动时）
    */
-  enqueuePrefetchTasks(
-    visibleLayouts: any[],
-    scrollDirection: -1 | 0 | 1,
-    allLayouts: any[],
-    scale: number
-  ) {
+  enqueuePrefetchTasks(visibleLayouts: any[], scrollDirection: -1 | 0 | 1, allLayouts: any[], scale: number) {
     if (!this.enabled || visibleLayouts.length === 0) return;
 
-    const indices = [...visibleLayouts.map(l => l.pageIndex)].sort((a, b) => a - b);
+    const indices = [...visibleLayouts.map((l) => l.pageIndex)].sort((a, b) => a - b);
     const first = indices[0];
     const last = indices[indices.length - 1];
 
@@ -257,18 +247,18 @@ export class RenderManager {
     for (let i = 0; i < this.config.slowPrefetchPages; i++) {
       const idx = start + i * step;
       if (idx < 0 || idx >= allLayouts.length) continue;
-      
+
       const info = this.getPageRenderInfo(idx);
       if (info && (info.imageBitmap || info.isLoading)) continue;
-      
-      const layout = allLayouts.find(l => l.pageIndex === idx);
+
+      const layout = allLayouts.find((l) => l.pageIndex === idx);
       if (!layout) continue;
-      
+
       this.enqueueRenderTask({
         pageIndex: idx,
         layout,
         priority,
-        scale
+        scale,
       });
       priority++;
     }
@@ -286,7 +276,7 @@ export class RenderManager {
 
     while (this.renderTasks.length > 0 && this.enabled) {
       const task = this.renderTasks.shift()!;
-      
+
       // 检查任务是否过期
       if (task.epoch < this.currentEpoch) {
         continue;
@@ -313,7 +303,7 @@ export class RenderManager {
     }
 
     this.isProcessing = false;
-    
+
     // 通知渲染完成
     if (this.renderTasks.length === 0 && this.onRenderComplete) {
       this.onRenderComplete();
@@ -336,4 +326,4 @@ export class RenderManager {
 }
 
 // 全局单例实例
-export const renderManager = new RenderManager(); 
+export const renderManager = new RenderManager();

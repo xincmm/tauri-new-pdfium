@@ -1,5 +1,5 @@
-import { RenderBucket } from '@/PdfViewer/types/pdf';
-import { BUCKET_STRATEGY } from '@/PdfViewer/config';
+import { RenderBucket } from "@/PdfViewer/types/pdf";
+import { BUCKET_STRATEGY } from "@/PdfViewer/config";
 
 /**
  * 生成渲染桶配置
@@ -10,17 +10,17 @@ export function generateRenderBuckets(targetScale: number): RenderBucket[] {
   const buckets: RenderBucket[] = [
     {
       scale: targetScale * BUCKET_STRATEGY.TARGET_FACTOR,
-      key: 'target',
+      key: "target",
       isTarget: true,
     },
     {
       scale: targetScale * BUCKET_STRATEGY.HIGHER_FACTOR,
-      key: 'higher',
+      key: "higher",
       isTarget: false,
     },
     {
       scale: targetScale * BUCKET_STRATEGY.LOWER_FACTOR,
-      key: 'lower',
+      key: "lower",
       isTarget: false,
     },
   ];
@@ -35,20 +35,16 @@ export function generateRenderBuckets(targetScale: number): RenderBucket[] {
  * @param targetScale 目标缩放比例
  * @returns 最佳桶，优先选择 >= 目标清晰度的桶
  */
-export function selectBestAvailableBucket(
-  buckets: RenderBucket[],
-  targetScale: number
-): RenderBucket | null {
+export function selectBestAvailableBucket(buckets: RenderBucket[], targetScale: number): RenderBucket | null {
   if (buckets.length === 0) return null;
 
   // 首先查找 >= 目标清晰度的桶
-  const suitableBuckets = buckets.filter(bucket => bucket.scale >= targetScale);
-  
+  const suitableBuckets = buckets.filter((bucket) => bucket.scale >= targetScale);
+
   if (suitableBuckets.length > 0) {
     // 选择最接近目标清晰度的桶（避免过度清晰造成资源浪费）
-    return suitableBuckets.reduce((best, current) => 
-      Math.abs(current.scale - targetScale) < Math.abs(best.scale - targetScale) 
-        ? current : best
+    return suitableBuckets.reduce((best, current) =>
+      Math.abs(current.scale - targetScale) < Math.abs(best.scale - targetScale) ? current : best,
     );
   }
 
@@ -66,7 +62,7 @@ export function selectBestAvailableBucket(
 export function shouldLoadTargetBucket(
   activeBucket: RenderBucket | null,
   targetBucket: RenderBucket,
-  targetScale: number
+  targetScale: number,
 ): boolean {
   if (!activeBucket) return true;
 
@@ -100,7 +96,7 @@ export function shouldSwitchToTargetBucket(
   targetBucket: RenderBucket,
   isStill: boolean,
   stillDuration: number,
-  targetBucketReady: boolean
+  targetBucketReady: boolean,
 ): boolean {
   if (!activeBucket || !targetBucketReady || !isStill) {
     return false;
@@ -123,7 +119,7 @@ export function shouldSwitchToTargetBucket(
  */
 export function generateBucketTileKey(
   bucket: RenderBucket,
-  tileInfo: { id: string; page: number; tx: number; ty: number }
+  tileInfo: { id: string; page: number; tx: number; ty: number },
 ): string {
   return `${bucket.key}_${tileInfo.id}_p${tileInfo.page}_s${Math.round(bucket.scale * 100)}_${tileInfo.tx}_${tileInfo.ty}`;
-} 
+}

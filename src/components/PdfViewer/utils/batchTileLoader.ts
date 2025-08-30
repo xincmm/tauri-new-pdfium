@@ -1,6 +1,6 @@
-import { invoke } from '@tauri-apps/api/core';
-import { TileRequest, TileData, BatchTileResult } from '@/PdfViewer/types/pdf';
-import { TILE_SIZE } from '@/PdfViewer/config';
+import { invoke } from "@tauri-apps/api/core";
+import { TileRequest, TileData, BatchTileResult } from "@/PdfViewer/types/pdf";
+import { TILE_SIZE } from "@/PdfViewer/config";
 
 // 批量瓦片加载器
 export class BatchTileLoader {
@@ -9,25 +9,25 @@ export class BatchTileLoader {
   // 将传统瓦片信息转换为新的TileRequest格式
   private convertToTileRequest(
     _pdfId: string,
-    pageIndex: number, 
+    pageIndex: number,
     tx: number,
     ty: number,
     scale: number,
     dpr: number,
     _pageWidth: number,
-    _pageHeight: number
+    _pageHeight: number,
   ): TileRequest {
     const tileSize = TILE_SIZE;
-    
+
     // 正确的坐标转换：屏幕像素 → PDF points
     // 屏幕上瓦片的像素坐标
     const tilePixelX = tx * tileSize;
     const tilePixelY = ty * tileSize;
-    
+
     // 转换为PDF points坐标 (72 points = 96 pixels at 100% scale)
     // 公式: pixels * 72 / 96 / scale
     const pointsPerPixel = 72.0 / 96.0 / scale;
-    
+
     const tileRequest = {
       page_index: pageIndex,
       rect_x: tilePixelX * pointsPerPixel,
@@ -37,7 +37,7 @@ export class BatchTileLoader {
       scale_factor: scale,
       dpr: dpr,
     };
-    
+
     // 添加调试日志（仅第一个瓦片）
     if (tx === 0 && ty === 0) {
       console.log(`🔧 瓦片坐标转换 (tx=${tx}, ty=${ty}):`, {
@@ -45,10 +45,10 @@ export class BatchTileLoader {
         转换因子: pointsPerPixel.toFixed(4),
         PDF坐标: `${tileRequest.rect_x.toFixed(1)}x${tileRequest.rect_y.toFixed(1)}`,
         瓦片尺寸_points: `${tileRequest.rect_width.toFixed(1)}x${tileRequest.rect_height.toFixed(1)}`,
-        缩放参数: `scale=${scale}, dpr=${dpr}`
+        缩放参数: `scale=${scale}, dpr=${dpr}`,
       });
     }
-    
+
     return tileRequest;
   }
 
@@ -80,7 +80,9 @@ export class BatchTileLoader {
 
       // 检查瓦片数据边界
       if (offset + tileLength > data.length) {
-        console.error(`数据越界：尝试读取瓦片数据时，offset=${offset}, tileLength=${tileLength}, dataLength=${data.length}`);
+        console.error(
+          `数据越界：尝试读取瓦片数据时，offset=${offset}, tileLength=${tileLength}, dataLength=${data.length}`,
+        );
         break;
       }
 
@@ -102,29 +104,31 @@ export class BatchTileLoader {
   }
 
   // 批量渲染瓦片
-  async renderTilesBatch(requests: {
-    pdfId: string;
-    pageIndex: number;
-    tx: number;
-    ty: number;
-    scale: number;
-    dpr: number;
-    pageWidth: number;
-    pageHeight: number;
-    tileKey: string;
-  }[]): Promise<BatchTileResult> {
+  async renderTilesBatch(
+    requests: {
+      pdfId: string;
+      pageIndex: number;
+      tx: number;
+      ty: number;
+      scale: number;
+      dpr: number;
+      pageWidth: number;
+      pageHeight: number;
+      tileKey: string;
+    }[],
+  ): Promise<BatchTileResult> {
     // 生成批次ID
-    const batchId = requests.map(r => r.tileKey).join('|');
-    
+    const batchId = requests.map((r) => r.tileKey).join("|");
+
     if (this.loadingBatches.has(batchId)) {
-      throw new Error('Batch already loading');
+      throw new Error("Batch already loading");
     }
 
     this.loadingBatches.add(batchId);
 
     try {
       // 转换为后端请求格式
-      const tileRequests: TileRequest[] = requests.map(req =>
+      const tileRequests: TileRequest[] = requests.map((req) =>
         this.convertToTileRequest(
           req.pdfId,
           req.pageIndex,
@@ -133,20 +137,20 @@ export class BatchTileLoader {
           req.scale,
           req.dpr,
           req.pageWidth,
-          req.pageHeight
-        )
+          req.pageHeight,
+        ),
       );
 
       console.log(`🚀 开始批量渲染: ${tileRequests.length} 个瓦片`);
 
       // 调用后端渲染命令
-      const rawData = await invoke<number[]>('render_tiles_batch', { 
-        requests: tileRequests 
+      const rawData = await invoke<number[]>("render_tiles_batch", {
+        requests: tileRequests,
       });
 
       // 转换为 Uint8Array
       const packedData = new Uint8Array(rawData);
-      
+
       // 解析返回数据
       const tiles = this.parsePackedTileData(packedData);
 
@@ -162,7 +166,6 @@ export class BatchTileLoader {
         totalBytes: packedData.length,
         tileCount: tiles.length,
       };
-
     } finally {
       this.loadingBatches.delete(batchId);
     }
@@ -178,23 +181,25 @@ export class BatchTileLoader {
     dpr: number,
     pageWidth: number,
     pageHeight: number,
-    tileKey: string
+    tileKey: string,
   ): Promise<TileData> {
-    const result = await this.renderTilesBatch([{
-      pdfId,
-      pageIndex,
-      tx,
-      ty,
-      scale,
-      dpr,
-      pageWidth,
-      pageHeight,
-      tileKey,
-    }]);
+    const result = await this.renderTilesBatch([
+      {
+        pdfId,
+        pageIndex,
+        tx,
+        ty,
+        scale,
+        dpr,
+        pageWidth,
+        pageHeight,
+        tileKey,
+      },
+    ]);
 
     return result.tiles[0];
   }
 }
 
 // 全局批量瓦片加载器实例
-export const batchTileLoader = new BatchTileLoader(); 
+export const batchTileLoader = new BatchTileLoader();

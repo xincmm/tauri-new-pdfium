@@ -14,21 +14,21 @@ export function getPageDimensions(metadata: PdfMetadata, pageIndex: number): [nu
   if (pageIndex < 0 || pageIndex >= metadata.total_pages) {
     throw new Error(`Page index ${pageIndex} out of range [0, ${metadata.total_pages - 1}]`);
   }
-  
+
   const templateIndex = metadata.page_template_indices[pageIndex];
   if (templateIndex >= metadata.page_dimension_templates.length) {
     throw new Error(`Invalid template index ${templateIndex} for page ${pageIndex}`);
   }
-  
+
   return metadata.page_dimension_templates[templateIndex];
 }
 
 export interface CharBoxPt {
   idx: number;
   ch: string;
-  left: number; 
-  top: number; 
-  right: number; 
+  left: number;
+  top: number;
+  right: number;
   bottom: number; // pt 坐标
 }
 
@@ -98,15 +98,15 @@ export interface TileState {
 export interface RenderBucket {
   scale: number;
   key: string;
-  isTarget: boolean;  // 是否为目标桶（1:1像素对齐）
+  isTarget: boolean; // 是否为目标桶（1:1像素对齐）
 }
 
 export interface PageRenderState {
   targetBucket: RenderBucket;
-  activeBucket: RenderBucket | null;  // 当前显示的桶
-  availableBuckets: RenderBucket[];   // 可用的桶
-  lastStillTime: number;              // 最后静止时间
-  needsFadeTransition: boolean;       // 是否需要淡入切换
+  activeBucket: RenderBucket | null; // 当前显示的桶
+  availableBuckets: RenderBucket[]; // 可用的桶
+  lastStillTime: number; // 最后静止时间
+  needsFadeTransition: boolean; // 是否需要淡入切换
 }
 
 // 常量定义已移至 src/components/PdfViewer/config.ts

@@ -35,10 +35,13 @@ export interface CompositionResult {
 
 export class PageCompositor {
   private worker: Worker | null = null;
-  private pendingRequests = new Map<string, {
-    resolve: (result: CompositionResult) => void;
-    reject: (error: Error) => void;
-  }>();
+  private pendingRequests = new Map<
+    string,
+    {
+      resolve: (result: CompositionResult) => void;
+      reject: (error: Error) => void;
+    }
+  >();
   private requestCounter = 0;
 
   constructor() {
@@ -47,12 +50,12 @@ export class PageCompositor {
 
   private initWorker() {
     try {
-      this.worker = new Worker('/workers/page-compositor-worker.js');
+      this.worker = new Worker("/workers/page-compositor-worker.js");
       this.worker.onmessage = this.handleWorkerMessage.bind(this);
       this.worker.onerror = this.handleWorkerError.bind(this);
-      console.log('🎨 PageCompositor initialized');
+      console.log("🎨 PageCompositor initialized");
     } catch (error) {
-      console.error('Failed to create page compositor worker:', error);
+      console.error("Failed to create page compositor worker:", error);
       throw error;
     }
   }
@@ -61,28 +64,28 @@ export class PageCompositor {
     const { type, id, imageBitmap, performance, error, stats } = event.data;
 
     switch (type) {
-      case 'page-composed':
+      case "page-composed":
         this.handlePageComposed(id, imageBitmap, performance);
         break;
-      case 'composition-error':
+      case "composition-error":
         this.handleCompositionError(id, error);
         break;
-      case 'cache-cleared':
-        console.log('🗑️ Worker tile cache cleared');
+      case "cache-cleared":
+        console.log("🗑️ Worker tile cache cleared");
         break;
-      case 'cache-stats':
-        console.log('📊 Worker cache stats:', stats);
+      case "cache-stats":
+        console.log("📊 Worker cache stats:", stats);
         break;
       default:
-        console.warn('Unknown worker message type:', type);
+        console.warn("Unknown worker message type:", type);
     }
   }
 
   private handleWorkerError(error: ErrorEvent) {
-    console.error('Page compositor worker error:', error);
+    console.error("Page compositor worker error:", error);
     // Reject all pending requests
     this.pendingRequests.forEach(({ reject }) => {
-      reject(new Error('Worker error: ' + error.message));
+      reject(new Error("Worker error: " + error.message));
     });
     this.pendingRequests.clear();
   }
@@ -93,7 +96,7 @@ export class PageCompositor {
       request.resolve({ imageBitmap, performance });
       this.pendingRequests.delete(id);
     } else {
-      console.warn('No pending request for composed page:', id);
+      console.warn("No pending request for composed page:", id);
       // Close orphaned bitmap
       try {
         if (imageBitmap.close) imageBitmap.close();
@@ -112,21 +115,21 @@ export class PageCompositor {
   /**
    * Compose a page from tiles using OffscreenCanvas in worker
    */
-  composePage(request: Omit<CompositionRequest, 'id'>): Promise<CompositionResult> {
+  composePage(request: Omit<CompositionRequest, "id">): Promise<CompositionResult> {
     if (!this.worker) {
-      return Promise.reject(new Error('Worker not initialized'));
+      return Promise.reject(new Error("Worker not initialized"));
     }
 
     const id = `compose_${++this.requestCounter}_${Date.now()}`;
-    
+
     return new Promise((resolve, reject) => {
       this.pendingRequests.set(id, { resolve, reject });
 
       // Send composition request to worker
       this.worker!.postMessage({
-        type: 'compose-page',
+        type: "compose-page",
         id,
-        ...request
+        ...request,
       });
     });
   }
@@ -136,7 +139,7 @@ export class PageCompositor {
    */
   clearCache(): void {
     if (this.worker) {
-      this.worker.postMessage({ type: 'clear-cache', id: 'clear_' + Date.now() });
+      this.worker.postMessage({ type: "clear-cache", id: "clear_" + Date.now() });
     }
   }
 
@@ -145,7 +148,7 @@ export class PageCompositor {
    */
   getCacheStats(): void {
     if (this.worker) {
-      this.worker.postMessage({ type: 'get-cache-stats', id: 'stats_' + Date.now() });
+      this.worker.postMessage({ type: "get-cache-stats", id: "stats_" + Date.now() });
     }
   }
 
@@ -155,7 +158,7 @@ export class PageCompositor {
   destroy(): void {
     // Reject all pending requests
     this.pendingRequests.forEach(({ reject }) => {
-      reject(new Error('PageCompositor destroyed'));
+      reject(new Error("PageCompositor destroyed"));
     });
     this.pendingRequests.clear();
 
@@ -165,9 +168,9 @@ export class PageCompositor {
       this.worker = null;
     }
 
-    console.log('🗑️ PageCompositor destroyed');
+    console.log("🗑️ PageCompositor destroyed");
   }
 }
 
 // Global instance
-export const pageCompositor = new PageCompositor(); 
+export const pageCompositor = new PageCompositor();

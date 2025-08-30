@@ -1,6 +1,6 @@
 // 插件系统核心实现
-import { ReactPDF } from '@/PdfViewer/types/pdf-core';
-import { documentManager } from './DocumentManager';
+import { ReactPDF } from "@/PdfViewer/types/pdf-core";
+import { documentManager } from "./DocumentManager";
 
 /**
  * 简单的事件总线实现
@@ -30,7 +30,7 @@ export class EventBus implements ReactPDF.EventBus {
     if (eventListeners) {
       // 异步执行所有监听器，避免阻塞
       setTimeout(() => {
-        eventListeners.forEach(handler => {
+        eventListeners.forEach((handler) => {
           try {
             handler(data);
           } catch (error) {
@@ -77,7 +77,7 @@ export class StateManager implements ReactPDF.StateManager {
     // 通知订阅者
     const keySubscribers = this.subscribers.get(key);
     if (keySubscribers && oldValue !== value) {
-      keySubscribers.forEach(callback => {
+      keySubscribers.forEach((callback) => {
         try {
           callback(value);
         } catch (error) {
@@ -140,7 +140,7 @@ export class PluginContext implements ReactPDF.PluginContext {
   constructor(
     public documentManager: ReactPDF.DocumentManager,
     public eventBus: ReactPDF.EventBus,
-    public stateManager: ReactPDF.StateManager
+    public stateManager: ReactPDF.StateManager,
   ) {}
 
   registerCommand(name: string, handler: ReactPDF.CommandHandler): void {
@@ -192,11 +192,7 @@ export class PluginManager {
   constructor() {
     this.eventBus = new EventBus();
     this.stateManager = new StateManager();
-    this.pluginContext = new PluginContext(
-      documentManager,
-      this.eventBus,
-      this.stateManager
-    );
+    this.pluginContext = new PluginContext(documentManager, this.eventBus, this.stateManager);
   }
 
   /**
@@ -219,12 +215,12 @@ export class PluginManager {
     try {
       await plugin.initialize(this.pluginContext);
       this.plugins.set(plugin.name, plugin);
-      
-      this.eventBus.emit('plugin:registered', {
+
+      this.eventBus.emit("plugin:registered", {
         name: plugin.name,
-        version: plugin.version
+        version: plugin.version,
       });
-      
+
       console.log(`Plugin ${plugin.name} v${plugin.version} registered successfully`);
     } catch (error) {
       console.error(`Failed to initialize plugin ${plugin.name}:`, error);
@@ -242,21 +238,19 @@ export class PluginManager {
     }
 
     // 检查是否有其他插件依赖于此插件
-    const dependents = Array.from(this.plugins.values()).filter(p => 
-      p.dependencies?.includes(name)
-    );
-    
+    const dependents = Array.from(this.plugins.values()).filter((p) => p.dependencies?.includes(name));
+
     if (dependents.length > 0) {
-      const dependentNames = dependents.map(p => p.name).join(', ');
+      const dependentNames = dependents.map((p) => p.name).join(", ");
       throw new Error(`Cannot unregister plugin ${name}: it is required by ${dependentNames}`);
     }
 
     try {
       await plugin.destroy();
       this.plugins.delete(name);
-      
-      this.eventBus.emit('plugin:unregistered', { name });
-      
+
+      this.eventBus.emit("plugin:unregistered", { name });
+
       console.log(`Plugin ${name} unregistered successfully`);
     } catch (error) {
       console.error(`Failed to destroy plugin ${name}:`, error);
@@ -282,10 +276,10 @@ export class PluginManager {
    * 获取所有已注册的插件
    */
   getRegisteredPlugins(): Array<{ name: string; version: string; dependencies?: string[] }> {
-    return Array.from(this.plugins.values()).map(plugin => ({
+    return Array.from(this.plugins.values()).map((plugin) => ({
       name: plugin.name,
       version: plugin.version,
-      dependencies: plugin.dependencies
+      dependencies: plugin.dependencies,
     }));
   }
 
@@ -352,7 +346,7 @@ export class PluginManager {
 
       if (plugin.dependencies) {
         for (const depName of plugin.dependencies) {
-          const dep = plugins.find(p => p.name === depName);
+          const dep = plugins.find((p) => p.name === depName);
           if (dep) {
             visit(dep);
           }
@@ -373,4 +367,4 @@ export class PluginManager {
 }
 
 // 全局插件管理器实例
-export const pluginManager = new PluginManager(); 
+export const pluginManager = new PluginManager();
