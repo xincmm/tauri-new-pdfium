@@ -3,7 +3,24 @@
 export interface PdfMetadata {
   id: string;
   total_pages: number;
-  page_dims: [number, number][];
+  // 去重的页面尺寸模板
+  page_dimension_templates: [number, number][];
+  // 每页对应的模板索引
+  page_template_indices: number[];
+}
+
+// 获取指定页面的尺寸
+export function getPageDimensions(metadata: PdfMetadata, pageIndex: number): [number, number] {
+  if (pageIndex < 0 || pageIndex >= metadata.total_pages) {
+    throw new Error(`Page index ${pageIndex} out of range [0, ${metadata.total_pages - 1}]`);
+  }
+  
+  const templateIndex = metadata.page_template_indices[pageIndex];
+  if (templateIndex >= metadata.page_dimension_templates.length) {
+    throw new Error(`Invalid template index ${templateIndex} for page ${pageIndex}`);
+  }
+  
+  return metadata.page_dimension_templates[templateIndex];
 }
 
 export interface CharBoxPt {

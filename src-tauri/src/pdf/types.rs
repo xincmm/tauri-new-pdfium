@@ -6,12 +6,15 @@ pub const BASE_DPI: f32 = 96.0;
 pub const MAX_DPI: f32 = 1000.0;
 pub const MIN_DPI: f32 = 36.0;
 
-// PDF文档元数据 - 避免与pdfium类型冲突
+// PDF文档元数据 - 优化内存使用
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PdfDocumentMetadata {
     pub id: String,
     pub total_pages: u32,
-    pub page_dims: Vec<(f32, f32)>,
+    // 去重的页面尺寸模板
+    pub page_dimension_templates: Vec<(f32, f32)>,
+    // 每页对应的模板索引
+    pub page_template_indices: Vec<u16>,
 }
 
 // 瓦片请求数据结构（从worker.rs导出到这里）

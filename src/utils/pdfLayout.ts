@@ -1,87 +1,86 @@
-import { PdfMetadata, ViewState, PageLayout, PAGE_MARGIN } from '../types/pdf';
+import { PdfMetadata, ViewState, PageLayout, getPageDimensions } from '../types/pdf';
 
-// 计算页面布局
-export const calculatePageLayouts = (
-  pdfMetadata: PdfMetadata | null,
+export function calculatePageLayouts(
+  pdfMetadata: PdfMetadata,
   viewState: ViewState
-): PageLayout[] => {
-  if (!pdfMetadata) return [];
-  
-  const baseDpi = 96.0;
+): PageLayout[] {
+  const { scale } = viewState;
   const layouts: PageLayout[] = [];
-  let currentY = PAGE_MARGIN;
+  
+  let currentY = 0;
+  const pageMargin = 20;
   
   for (let i = 0; i < pdfMetadata.total_pages; i++) {
-    const [pageWidth, pageHeight] = pdfMetadata.page_dims[i];
-    const screenPageWidth = ((pageWidth / 72.0) * baseDpi * viewState.scale);
-    const screenPageHeight = ((pageHeight / 72.0) * baseDpi * viewState.scale);
+    // 使用优化的页面尺寸获取
+    const [pdfWidthPt, pdfHeightPt] = getPageDimensions(pdfMetadata, i);
+    
+    // 将 PDF 点转换为屏幕像素（72 点 = 96 像素，在 100% 缩放下）
+    const screenWidth = (pdfWidthPt * 96 / 72) * scale;
+    const screenHeight = (pdfHeightPt * 96 / 72) * scale;
     
     layouts.push({
       pageIndex: i,
       y: currentY,
-      width: screenPageWidth,
-      height: screenPageHeight,
+      width: screenWidth,
+      height: screenHeight,
     });
     
-    currentY += screenPageHeight + PAGE_MARGIN;
+    currentY += screenHeight + pageMargin;
   }
   
   return layouts;
-};
+}
 
-// 计算总文档高度
-export const getTotalDocumentHeight = (layouts: PageLayout[]): number => {
-  if (layouts.length === 0) return 0;
-  const lastLayout = layouts[layouts.length - 1];
-  return lastLayout.y + lastLayout.height + PAGE_MARGIN;
-};
-
-// 获取当前可见的页面
-export const getVisiblePages = (
-  layouts: PageLayout[],
+export function getVisiblePages(
+  pageLayouts: PageLayout[],
   containerHeight: number,
   scrollY: number
-): PageLayout[] => {
+): PageLayout[] {
   const viewportTop = scrollY;
   const viewportBottom = scrollY + containerHeight;
   
-  return layouts.filter(layout => 
-    layout.y < viewportBottom && layout.y + layout.height > viewportTop
-  );
-};
+  return pageLayouts.filter(layout => {
+    const pageTop = layout.y;
+    const pageBottom = layout.y + layout.height;
+    
+    // 页面与视口有交集
+    return pageBottom > viewportTop && pageTop < viewportBottom;
+  });
+}
 
-// 获取扩展的可见页面（包括预加载区域）
-export const getExpandedVisiblePages = (
-  layouts: PageLayout[],
+export function getExpandedVisiblePages(
+  pageLayouts: PageLayout[],
   containerHeight: number,
   scrollY: number,
   lastScrollY: number,
-  preloadPagesAhead: number
-): PageLayout[] => {
-  // 首先获取当前可见的页面
-  const currentVisiblePages = getVisiblePages(layouts, containerHeight, scrollY);
+  preloadAhead: number
+): PageLayout[] {
+  // 基础可见页面
+  const visiblePages = getVisiblePages(pageLayouts, containerHeight, scrollY);
   
-  if (currentVisiblePages.length === 0) return [];
+  if (visiblePages.length === 0) return [];
   
-  // 根据滚动方向和预加载页数确定预加载范围
-  const scrollingDown = scrollY > lastScrollY;
-  const firstVisiblePageIndex = currentVisiblePages[0].pageIndex;
-  const lastVisiblePageIndex = currentVisiblePages[currentVisiblePages.length - 1].pageIndex;
+  // 判断滚动方向
+  const scrollDirection = scrollY > lastScrollY ? 1 : scrollY < lastScrollY ? -1 : 0;
   
-  let startPageIndex = firstVisiblePageIndex;
-  let endPageIndex = lastVisiblePageIndex;
+  const firstVisibleIndex = visiblePages[0].pageIndex;
+  const lastVisibleIndex = visiblePages[visiblePages.length - 1].pageIndex;
   
-  if (scrollingDown) {
-    // 向下滚动时，预加载后面的页面
-    endPageIndex = Math.min(layouts.length - 1, lastVisiblePageIndex + preloadPagesAhead);
+  // 扩展范围
+  let startIndex = firstVisibleIndex;
+  let endIndex = lastVisibleIndex;
+  
+  if (scrollDirection > 0) {
+    // 向下滚动，预加载下方页面
+    endIndex = Math.min(pageLayouts.length - 1, lastVisibleIndex + preloadAhead);
+  } else if (scrollDirection < 0) {
+    // 向上滚动，预加载上方页面
+    startIndex = Math.max(0, firstVisibleIndex - preloadAhead);
   } else {
-    // 向上滚动时，预加载前面的页面，但也保持一些后面的页面
-    startPageIndex = Math.max(0, firstVisiblePageIndex - Math.floor(preloadPagesAhead / 2));
-    endPageIndex = Math.min(layouts.length - 1, lastVisiblePageIndex + Math.ceil(preloadPagesAhead / 2));
+    // 静止或初始状态，双向预加载
+    startIndex = Math.max(0, firstVisibleIndex - Math.floor(preloadAhead / 2));
+    endIndex = Math.min(pageLayouts.length - 1, lastVisibleIndex + Math.ceil(preloadAhead / 2));
   }
   
-  // 返回扩展范围内的所有页面
-  return layouts.filter(layout => 
-    layout.pageIndex >= startPageIndex && layout.pageIndex <= endPageIndex
-  );
-}; 
+  return pageLayouts.slice(startIndex, endIndex + 1);
+} 

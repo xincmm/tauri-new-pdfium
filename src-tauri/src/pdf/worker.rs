@@ -156,11 +156,36 @@ impl PdfWorker {
             let page_count = bindings.FPDF_GetPageCount(doc) as u32;
             let mut page_dims = Vec::with_capacity(page_count as usize);
             
+            // 收集所有页面尺寸
             for i in 0..page_count {
                 let mut size = FS_SIZEF { width: 0.0, height: 0.0 };
                 bindings.FPDF_GetPageSizeByIndexF(doc, i as i32, &mut size);
                 page_dims.push((size.width, size.height));
             }
+            
+            // 生成去重的尺寸模板和索引映射
+            let mut dimension_templates = Vec::new();
+            let mut template_indices = Vec::with_capacity(page_count as usize);
+            
+            for &dim in &page_dims {
+                // 查找是否已存在相同尺寸的模板
+                if let Some(template_idx) = dimension_templates.iter().position(|template: &(f32, f32)| {
+                    (template.0 - dim.0).abs() < 0.01 && (template.1 - dim.1).abs() < 0.01
+                }) {
+                    template_indices.push(template_idx as u16);
+                } else {
+                    // 创建新模板
+                    let new_template_idx = dimension_templates.len();
+                    dimension_templates.push(dim);
+                    template_indices.push(new_template_idx as u16);
+                }
+            }
+            
+            println!("📄 页面尺寸优化: {} 页 -> {} 个模板 (节省 {:.1}%)", 
+                page_count, 
+                dimension_templates.len(),
+                (1.0 - dimension_templates.len() as f64 / page_count as f64) * 100.0
+            );
             
             self.document = Some(DocumentEntry {
                 bytes,
@@ -175,16 +200,12 @@ impl PdfWorker {
             let metadata = PdfDocumentMetadata {
                 id: doc_id.clone(),
                 total_pages: page_count,
-                page_dims: page_dims.clone(),
+                page_dimension_templates: dimension_templates,
+                page_template_indices: template_indices,
             };
             
-            println!(
-                "✅ PDF文档加载完成，耗时: {:?}, 页数: {}, ID: {}",
-                start_time.elapsed(),
-                page_count,
-                doc_id
-            );
-            println!("📏 页面尺寸: {:?}", page_dims);
+            println!("✅ PDF加载完成: {} ({} 页, 耗时 {:.1}ms)", 
+                file_path, page_count, start_time.elapsed().as_millis());
             
             Ok(metadata)
         }

@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
-import { PdfMetadata, TILE_SIZE } from '../../types/pdf';
+import { PdfMetadata, TILE_SIZE, getPageDimensions } from '../../types/pdf';
 import { batchTileLoader } from '../../utils/batchTileLoader';
 import { useAdaptiveTilePlan } from './hooks/useAdaptiveTilePlan';
 import { pageCompositor, type TileData } from '../../utils/pageCompositor';
@@ -47,6 +47,16 @@ export const SimplePage: React.FC<SimplePageProps> = ({
   const { width: pageWidth, height: pageHeight } = pageLayout;
   const devicePixelRatio = Math.min(window.devicePixelRatio || 1, 2);
   const scale = viewState.scale;
+
+  // 获取PDF原始页面尺寸(以点为单位，72点=1英寸) - 使用优化的模板查找
+  const [pdfPageWidthPts, pdfPageHeightPts] = useMemo(() => {
+    try {
+      return getPageDimensions(pdfMetadata, pageIndex);
+    } catch (error) {
+      console.error(`Failed to get dimensions for page ${pageIndex}:`, error);
+      return [612, 792]; // 默认 A4 尺寸
+    }
+  }, [pdfMetadata, pageIndex]);
 
   // 自适应瓦片计划（按缩放、视口及滚动速度/方向进行半页/行级加载）
   const { tilesToLoad, tyRange, tilesX, tilesY } = useAdaptiveTilePlan({
