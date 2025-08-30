@@ -20,6 +20,8 @@ interface SimplePageProps {
   viewportTop: number;
   viewportHeight: number;
   pageTopAbs: number;
+  viewportVelocityPxPerMs: number;
+  scrollDirection: -1 | 0 | 1;
 }
 
 export const SimplePage: React.FC<SimplePageProps> = ({
@@ -32,6 +34,8 @@ export const SimplePage: React.FC<SimplePageProps> = ({
   viewportTop,
   viewportHeight,
   pageTopAbs,
+  viewportVelocityPxPerMs,
+  scrollDirection,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [tiles, setTiles] = useState<Map<string, ImageBitmap>>(new Map());
@@ -46,7 +50,7 @@ export const SimplePage: React.FC<SimplePageProps> = ({
   const originalRatio = pdfPageWidthPts / pdfPageHeightPts;
   const currentRatio = pageWidth / pageHeight;
 
-  // 自适应瓦片计划（按缩放与视口带宽进行半页/行级加载）
+  // 自适应瓦片计划（按缩放、视口及滚动速度/方向进行半页/行级加载）
   const { tilesToLoad, tyRange, tilesX, tilesY } = useAdaptiveTilePlan({
     scale,
     pageWidth,
@@ -55,18 +59,14 @@ export const SimplePage: React.FC<SimplePageProps> = ({
     viewportTop,
     viewportHeight,
     pageTopAbs,
+    viewportVelocityPxPerMs,
+    scrollDirection,
   });
-
-  // console.log(`📄 页面${pageIndex + 1}:`);
-  // console.log(`  PDF原始尺寸: ${pdfPageWidthPts.toFixed(1)}x${pdfPageHeightPts.toFixed(1)} 点 (比例: ${originalRatio.toFixed(3)})`);
-  // console.log(`  屏幕显示尺寸: ${pageWidth.toFixed(1)}x${pageHeight.toFixed(1)} 像素 (比例: ${currentRatio.toFixed(3)})`);
-  // console.log(`  瓦片网格: ${tilesX}x${tilesY}, DPR: ${devicePixelRatio}, 缩放: ${scale}x`);
 
   // 增量渲染当前计划所需的瓦片
   const renderPlannedTiles = useCallback(async () => {
     if (!isVisible || !shouldRender || isLoading) return;
 
-    // 计算本次需要请求、但未加载的瓦片
     const requests: any[] = [];
     for (const { tx, ty } of tilesToLoad) {
       const tileKey = `${pdfMetadata.id}_${pageIndex}_${scale}_${tx}_${ty}_dpr${devicePixelRatio}`;
@@ -91,7 +91,6 @@ export const SimplePage: React.FC<SimplePageProps> = ({
     try {
       const result = await batchTileLoader.renderTilesBatch(requests);
 
-      // 将新瓦片合并到现有缓存
       const merged = new Map<string, ImageBitmap>(tiles);
       for (let i = 0; i < result.tiles.length; i++) {
         const tileData = result.tiles[i];
@@ -116,7 +115,6 @@ export const SimplePage: React.FC<SimplePageProps> = ({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // 高分屏：将 backing store 放大到 dpr，同时保持 CSS 尺寸为逻辑像素
     const dpr = devicePixelRatio;
     const targetWidth = Math.floor(pageWidth);
     const targetHeight = Math.floor(pageHeight);
@@ -126,20 +124,15 @@ export const SimplePage: React.FC<SimplePageProps> = ({
     canvas.style.width = `${targetWidth}px`;
     canvas.style.height = `${targetHeight}px`;
 
-    // 以逻辑坐标绘制
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
-    // 清除画布（逻辑尺寸）
     ctx.clearRect(0, 0, targetWidth, targetHeight);
     
-    // 白色背景
     ctx.fillStyle = 'white';
     ctx.fillRect(0, 0, targetWidth, targetHeight);
 
-    // 绘制所有瓦片（按逻辑尺寸）
-    // 仅绘制已加载的瓦片，缺失瓦片保持空白
     for (let tx = 0; tx < tilesX; tx++) {
       for (let ty = 0; ty < tilesY; ty++) {
         const tileKey = `${pdfMetadata.id}_${pageIndex}_${scale}_${tx}_${ty}_dpr${devicePixelRatio}`;
@@ -153,19 +146,16 @@ export const SimplePage: React.FC<SimplePageProps> = ({
     }
   }, [tiles, pageWidth, pageHeight, devicePixelRatio, tilesX, tilesY, pdfMetadata.id, pageIndex, scale]);
 
-  // 当页面可见且空闲时，增量加载当前计划所需瓦片
   useEffect(() => {
     if (isVisible && shouldRender && !isLoading) {
       renderPlannedTiles();
     }
   }, [isVisible, shouldRender, isLoading, renderPlannedTiles, tilesToLoad]);
 
-  // 当缩放变化时清空旧瓦片，等待空闲后再渲染
   useEffect(() => {
     setTiles(new Map());
   }, [scale]);
 
-  // 当瓦片更新时重新绘制
   useEffect(() => {
     drawToCanvas();
   }, [tiles, drawToCanvas]);

@@ -19,6 +19,12 @@ export const SimpleViewer: React.FC = () => {
   const idleTimerRef = useRef<number | null>(null);
   const [hasInteracted, setHasInteracted] = useState<boolean>(false);
 
+  // 滚动速度/方向
+  const lastTsRef = useRef<number | null>(null);
+  const velocityEmaRef = useRef<number>(0);
+  const [scrollSpeedPxPerMs, setScrollSpeedPxPerMs] = useState<number>(0);
+  const [scrollDirection, setScrollDirection] = useState<-1 | 0 | 1>(0);
+
   // 监听容器高度变化
   useEffect(() => {
     const updateHeight = () => {
@@ -103,11 +109,27 @@ export const SimpleViewer: React.FC = () => {
     if (target) {
       setHasInteracted(true);
       // 记录上一次滚动位置
-      lastScrollYRef.current = viewState.scrollY;
+      const prevY = viewState.scrollY;
+      lastScrollYRef.current = prevY;
+
+      const now = performance.now();
+      if (lastTsRef.current != null) {
+        const dtMs = Math.max(0.1, now - lastTsRef.current);
+        const dy = target.scrollTop - prevY;
+        const instV = Math.abs(dy) / dtMs; // px/ms
+        const alpha = 0.3;
+        const ema = alpha * instV + (1 - alpha) * velocityEmaRef.current;
+        velocityEmaRef.current = ema;
+        setScrollSpeedPxPerMs(ema);
+        setScrollDirection(dy > 0 ? 1 : dy < 0 ? -1 : 0);
+      }
+      lastTsRef.current = now;
+
       setViewState(prev => ({
         ...prev,
         scrollY: target.scrollTop,
       }));
+
       // 标记为滚动中，并启动/重启防抖定时器
       setIsScrollIdle(false);
       if (idleTimerRef.current) {
@@ -211,6 +233,8 @@ export const SimpleViewer: React.FC = () => {
                     viewportTop={viewState.scrollY}
                     viewportHeight={containerHeight}
                     pageTopAbs={layout.y + 40}
+                    viewportVelocityPxPerMs={scrollSpeedPxPerMs}
+                    scrollDirection={scrollDirection}
                   />
                 )}
               </div>
