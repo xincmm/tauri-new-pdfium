@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { PdfMetadata, TILE_SIZE } from '../../types/pdf';
 import { batchTileLoader } from '../../utils/batchTileLoader';
 
@@ -16,8 +16,10 @@ interface SimplePageProps {
   };
   isVisible: boolean;
   shouldRender?: boolean;
-  containerRef: React.RefObject<HTMLDivElement | null>;
-  preload?: boolean; // 是否作为相邻页预加载
+  // 新增：用于计算视口在本页内的可见范围
+  pageTop: number; // 该页在滚动容器内容坐标系中的全局 top（SimpleViewer 中为 layout.y + 40）
+  viewportTop: number; // 容器 scrollTop（内容坐标系）
+  viewportBottom: number; // 容器 scrollTop + containerHeight（内容坐标系）
 }
 
 export const SimplePage: React.FC<SimplePageProps> = ({
@@ -27,13 +29,15 @@ export const SimplePage: React.FC<SimplePageProps> = ({
   viewState,
   isVisible,
   shouldRender = true,
-  containerRef,
-  preload = false,
+  pageTop,
+  viewportTop,
+  viewportBottom,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wrapperRef = useRef<HTMLDivElement>(null);
   const [tiles, setTiles] = useState<Map<string, ImageBitmap>>(new Map());
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingPrimary, setIsLoadingPrimary] = useState(false);
+  const [isLoadingPrefetch, setIsLoadingPrefetch] = useState(false);
+  const inFlightKeysRef = useRef<Set<string>>(new Set());
 
   const { width: pageWidth, height: pageHeight } = pageLayout;
   const devicePixelRatio = Math.min(window.devicePixelRatio || 1, 2);
@@ -48,174 +52,144 @@ export const SimplePage: React.FC<SimplePageProps> = ({
   const tilesX = Math.ceil(pageWidth / TILE_SIZE);
   const tilesY = Math.ceil(pageHeight / TILE_SIZE);
 
-  // 计算当前视口对应的可见瓦片范围（带缓冲）
-  const computeVisibleTileRange = useCallback(() => {
-    const BUFFER_TILES = 2;
+  // 视口在本页内的可见范围（逻辑像素）
+  const visibleYStart = Math.max(0, viewportTop - pageTop);
+  const visibleYEnd = Math.min(pageHeight, viewportBottom - pageTop);
 
-    const pageEl = wrapperRef.current;
-    const containerEl = containerRef.current;
-    if (!pageEl || !containerEl) {
-      console.log(`[#${pageIndex}] computeVisibleTileRange: refs not ready, fallback full page`, { tilesX, tilesY });
-      return {
-        tx0: 0,
-        ty0: 0,
-        tx1: tilesX - 1,
-        ty1: tilesY - 1,
-        isEmpty: tilesX === 0 || tilesY === 0,
-      };
+  // 行列索引（包含边界）
+  const visibleStartRow = Math.max(0, Math.floor(visibleYStart / TILE_SIZE));
+  const visibleEndRow = Math.max(0, Math.floor(Math.max(0, visibleYEnd - 1) / TILE_SIZE));
+
+  // 由于容器不水平滚动，默认整页宽度可见
+  const visibleStartCol = 0;
+  const visibleEndCol = Math.max(0, tilesX - 1);
+
+  // 缓冲与预加载参数
+  const BUFFER_TILES = 2; // 视口四周的即时缓冲
+  const PREFETCH_ROWS = 2; // 视口上下各两行
+
+  // 主要渲染范围（带缓冲）
+  const primaryRowStart = Math.max(0, visibleStartRow - BUFFER_TILES);
+  const primaryRowEnd = Math.min(tilesY - 1, visibleEndRow + BUFFER_TILES);
+  const primaryColStart = Math.max(0, visibleStartCol - BUFFER_TILES);
+  const primaryColEnd = Math.min(tilesX - 1, visibleEndCol + BUFFER_TILES);
+
+  // 预加载范围：在主要范围之外，再上下各两行
+  const prefetchTopStart = Math.max(0, primaryRowStart - PREFETCH_ROWS);
+  const prefetchTopEnd = Math.max(0, Math.min(tilesY - 1, primaryRowStart - 1));
+  const prefetchBottomStart = Math.min(tilesY - 1, primaryRowEnd + 1);
+  const prefetchBottomEnd = Math.min(tilesY - 1, primaryRowEnd + PREFETCH_ROWS);
+
+  const buildTileKey = useCallback((tx: number, ty: number) => {
+    return `${pdfMetadata.id}_${pageIndex}_${scale}_${tx}_${ty}_dpr${devicePixelRatio}`;
+  }, [pdfMetadata.id, pageIndex, scale, devicePixelRatio]);
+
+  const computeRequestsForRange = useCallback((rowStart: number, rowEnd: number, colStart: number, colEnd: number) => {
+    const requests: Array<{
+      pdfId: string;
+      pageIndex: number;
+      tx: number;
+      ty: number;
+      scale: number;
+      dpr: number;
+      pageWidth: number;
+      pageHeight: number;
+      tileKey: string;
+    }> = [];
+
+    for (let ty = rowStart; ty <= rowEnd; ty++) {
+      for (let tx = colStart; tx <= colEnd; tx++) {
+        const tileKey = buildTileKey(tx, ty);
+        if (!tiles.has(tileKey) && !inFlightKeysRef.current.has(tileKey)) {
+          requests.push({
+            pdfId: pdfMetadata.id,
+            pageIndex,
+            tx,
+            ty,
+            scale,
+            dpr: devicePixelRatio,
+            pageWidth,
+            pageHeight,
+            tileKey,
+          });
+        }
+      }
     }
 
-    const pageRect = pageEl.getBoundingClientRect();
-    const containerRect = containerEl.getBoundingClientRect();
+    return requests;
+  }, [buildTileKey, tiles, pdfMetadata.id, pageIndex, scale, devicePixelRatio, pageWidth, pageHeight]);
 
-    const visibleLeftPx = Math.max(0, containerRect.left - pageRect.left);
-    const visibleTopPx = Math.max(0, containerRect.top - pageRect.top);
-    const visibleRightPx = Math.min(pageWidth, containerRect.right - pageRect.left);
-    const visibleBottomPx = Math.min(pageHeight, containerRect.bottom - pageRect.top);
+  const applyBatchResult = useCallback(async (requests: any[], result: { tiles: Array<{ data: ArrayBufferLike }> }) => {
+    const newTiles = new Map<string, ImageBitmap>();
 
-    // 若无交集
-    if (visibleRightPx <= visibleLeftPx || visibleBottomPx <= visibleTopPx) {
-      console.log(`[#${pageIndex}] computeVisibleTileRange: no intersection`, {
-        pageRect,
-        containerRect,
-        visibleLeftPx,
-        visibleTopPx,
-        visibleRightPx,
-        visibleBottomPx,
-      });
-      return {
-        tx0: 0,
-        ty0: 0,
-        tx1: -1,
-        ty1: -1,
-        isEmpty: true,
-      };
+    for (let i = 0; i < result.tiles.length; i++) {
+      const tileData = result.tiles[i];
+      const request = requests[i];
+      const blob = new Blob([new Uint8Array(tileData.data)], { type: 'image/webp' });
+      const bitmap = await createImageBitmap(blob);
+      newTiles.set(request.tileKey, bitmap);
     }
 
-    const rawTx0 = Math.floor(visibleLeftPx / TILE_SIZE) - BUFFER_TILES;
-    const rawTy0 = Math.floor(visibleTopPx / TILE_SIZE) - BUFFER_TILES;
-    const rawTx1 = Math.floor((visibleRightPx - 1) / TILE_SIZE) + BUFFER_TILES;
-    const rawTy1 = Math.floor((visibleBottomPx - 1) / TILE_SIZE) + BUFFER_TILES;
-
-    const tx0 = Math.max(0, rawTx0);
-    const ty0 = Math.max(0, rawTy0);
-    const tx1 = Math.min(tilesX - 1, rawTx1);
-    const ty1 = Math.min(tilesY - 1, rawTy1);
-
-    console.log(`[#${pageIndex}] computeVisibleTileRange:`, {
-      pageRect,
-      containerRect,
-      pageWidth,
-      pageHeight,
-      tilesX,
-      tilesY,
-      visiblePx: { left: visibleLeftPx, top: visibleTopPx, right: visibleRightPx, bottom: visibleBottomPx },
-      rawRange: { rawTx0, rawTy0, rawTx1, rawTy1 },
-      clampedRange: { tx0, ty0, tx1, ty1 },
+    // 合并到现有 tiles
+    setTiles((prev) => {
+      const merged = new Map(prev);
+      for (const [k, v] of newTiles.entries()) {
+        merged.set(k, v);
+      }
+      return merged;
     });
 
-    return { tx0, ty0, tx1, ty1, isEmpty: tx1 < tx0 || ty1 < ty0 };
-  }, [containerRef, pageWidth, pageHeight, tilesX, tilesY, pageIndex]);
-
-  // 预加载页的范围（整页 + 缓冲边），不依赖容器可见区域
-  const getPreloadTileRange = useCallback(() => {
-    const BUFFER_TILES = 2;
-    const tx0 = 0;
-    const ty0 = 0;
-    const tx1 = Math.max(0, tilesX - 1);
-    const ty1 = Math.max(0, tilesY - 1);
-    // 在整页基础上增加2个缓冲边实际上等价于整页（已被clamp）
-    return { tx0, ty0, tx1, ty1, isEmpty: tilesX === 0 || tilesY === 0 };
-  }, [tilesX, tilesY]);
-
-  // 渲染所需范围内缺失的瓦片
-  const renderNeededTiles = useCallback(async () => {
-    if (!shouldRender || isLoading) return;
-
-    const range = isVisible ? computeVisibleTileRange() : (preload ? getPreloadTileRange() : { tx0: 0, ty0: 0, tx1: -1, ty1: -1, isEmpty: true });
-    if (range.isEmpty) return;
-
-    // 生成需要的tileKey集合
-    const neededKeys: string[] = [];
-    for (let tx = range.tx0; tx <= range.tx1; tx++) {
-      for (let ty = range.ty0; ty <= range.ty1; ty++) {
-        const tileKey = `${pdfMetadata.id}_${pageIndex}_${scale}_${tx}_${ty}_dpr${devicePixelRatio}`;
-        if (!tiles.has(tileKey)) {
-          neededKeys.push(tileKey);
-        }
-      }
+    // 移除 in-flight 标记
+    for (const req of requests) {
+      inFlightKeysRef.current.delete(req.tileKey);
     }
+  }, []);
 
-    if (neededKeys.length === 0) {
-      console.log(`[#${pageIndex}] no missing tiles in range`, { range, preload, isVisible });
-      return;
-    }
+  const renderPrimaryTiles = useCallback(async () => {
+    if (!isVisible || !shouldRender || isLoadingPrimary) return;
 
-    console.log(`[#${pageIndex}] ${preload ? 'preload' : 'visible'} request missing tiles: ${neededKeys.length} / totalRange=${(range.tx1 - range.tx0 + 1) * (range.ty1 - range.ty0 + 1)}`);
+    const requests = computeRequestsForRange(primaryRowStart, primaryRowEnd, primaryColStart, primaryColEnd);
+    if (requests.length === 0) return;
 
-    setIsLoading(true);
+    setIsLoadingPrimary(true);
+    requests.forEach((r) => inFlightKeysRef.current.add(r.tileKey));
+
     try {
-      // 构建缺失瓦片的请求
-      const requests = [] as Array<{
-        pdfId: string;
-        pageIndex: number;
-        tx: number;
-        ty: number;
-        scale: number;
-        dpr: number;
-        pageWidth: number;
-        pageHeight: number;
-        tileKey: string;
-      }>;
-
-      for (let tx = range.tx0; tx <= range.tx1; tx++) {
-        for (let ty = range.ty0; ty <= range.ty1; ty++) {
-          const tileKey = `${pdfMetadata.id}_${pageIndex}_${scale}_${tx}_${ty}_dpr${devicePixelRatio}`;
-          if (!tiles.has(tileKey)) {
-            requests.push({
-              pdfId: pdfMetadata.id,
-              pageIndex,
-              tx,
-              ty,
-              scale,
-              dpr: devicePixelRatio,
-              pageWidth,
-              pageHeight,
-              tileKey,
-            });
-          }
-        }
-      }
-
-      if (requests.length === 0) return;
-
-      console.log(`[#${pageIndex}] batchTiles -> ${requests.length} requests (${preload ? 'preload' : 'visible'})`);
       const result = await batchTileLoader.renderTilesBatch(requests);
-
-      // 转换为ImageBitmap并合并到现有Map
-      const bitmaps: Array<{ key: string; bitmap: ImageBitmap }> = [];
-      for (let i = 0; i < result.tiles.length; i++) {
-        const tileData = result.tiles[i];
-        const blob = new Blob([new Uint8Array(tileData.data)], { type: 'image/webp' });
-        const bitmap = await createImageBitmap(blob);
-        bitmaps.push({ key: requests[i].tileKey, bitmap });
-      }
-
-      setTiles(prev => {
-        const merged = new Map(prev);
-        for (const { key, bitmap } of bitmaps) {
-          merged.set(key, bitmap);
-        }
-        return merged;
-      });
-
-      console.log(`[#${pageIndex}] received tiles: ${bitmaps.length}, total loaded now=${tiles.size + bitmaps.length}`);
+      await applyBatchResult(requests, result);
     } catch (error) {
-      console.error(`❌ 页面${pageIndex + 1} 渲染缺失瓦片失败:`, error);
+      console.error(`❌ 页面${pageIndex + 1} 主要瓦片渲染失败:`, error);
     } finally {
-      setIsLoading(false);
+      setIsLoadingPrimary(false);
     }
-  }, [computeVisibleTileRange, getPreloadTileRange, isVisible, preload, shouldRender, isLoading, tiles, pdfMetadata.id, pageIndex, scale, devicePixelRatio, pageWidth, pageHeight]);
+  }, [isVisible, shouldRender, isLoadingPrimary, computeRequestsForRange, primaryRowStart, primaryRowEnd, primaryColStart, primaryColEnd, pageIndex, applyBatchResult]);
+
+  const prefetchAdjacentRows = useCallback(async () => {
+    if (!isVisible || !shouldRender || isLoadingPrefetch) return;
+
+    const topRequests = prefetchTopStart <= prefetchTopEnd
+      ? computeRequestsForRange(prefetchTopStart, prefetchTopEnd, primaryColStart, primaryColEnd)
+      : [];
+
+    const bottomRequests = prefetchBottomStart <= prefetchBottomEnd
+      ? computeRequestsForRange(prefetchBottomStart, prefetchBottomEnd, primaryColStart, primaryColEnd)
+      : [];
+
+    const requests = [...topRequests, ...bottomRequests];
+    if (requests.length === 0) return;
+
+    setIsLoadingPrefetch(true);
+    requests.forEach((r) => inFlightKeysRef.current.add(r.tileKey));
+
+    try {
+      const result = await batchTileLoader.renderTilesBatch(requests);
+      await applyBatchResult(requests, result);
+    } catch (error) {
+      console.error(`❌ 页面${pageIndex + 1} 预加载瓦片失败:`, error);
+    } finally {
+      setIsLoadingPrefetch(false);
+    }
+  }, [isVisible, shouldRender, isLoadingPrefetch, computeRequestsForRange, prefetchTopStart, prefetchTopEnd, prefetchBottomStart, prefetchBottomEnd, primaryColStart, primaryColEnd, pageIndex, applyBatchResult]);
 
   // 绘制到canvas
   const drawToCanvas = useCallback(() => {
@@ -247,51 +221,57 @@ export const SimplePage: React.FC<SimplePageProps> = ({
     ctx.fillStyle = 'white';
     ctx.fillRect(0, 0, targetWidth, targetHeight);
 
-    // 绘制所有已加载的瓦片（按逻辑尺寸）
+    // 绘制瓦片（按逻辑尺寸）
     for (let tx = 0; tx < tilesX; tx++) {
       for (let ty = 0; ty < tilesY; ty++) {
-        const tileKey = `${pdfMetadata.id}_${pageIndex}_${scale}_${tx}_${ty}_dpr${devicePixelRatio}`;
+        const tileKey = buildTileKey(tx, ty);
         const bitmap = tiles.get(tileKey);
         if (bitmap) {
           const x = tx * TILE_SIZE;
           const y = ty * TILE_SIZE;
-          ctx.drawImage(bitmap, x, y, TILE_SIZE, TILE_SIZE);
+          const w = Math.min(TILE_SIZE, targetWidth - x);
+          const h = Math.min(TILE_SIZE, targetHeight - y);
+          if (w > 0 && h > 0) {
+            ctx.drawImage(bitmap, x, y, Math.max(0, w), Math.max(0, h));
+          }
         }
       }
     }
+  }, [tiles, pageWidth, pageHeight, devicePixelRatio, tilesX, tilesY, buildTileKey]);
 
-    console.log(`[#${pageIndex}] drawToCanvas: drawnLoadedTiles=${tiles.size}`);
-  }, [tiles, pageWidth, pageHeight, devicePixelRatio, tilesX, tilesY, pdfMetadata.id, pageIndex, scale]);
-
-  // 当页面可见或滚动空闲时检查并渲染缺失瓦片（可见页与预加载页都会在空闲时进行）
+  // 当页面可见且空闲时，优先渲染主要范围；完成后预加载上下两行
   useEffect(() => {
-    if (shouldRender && !isLoading) {
-      if (isVisible || preload) {
-        renderNeededTiles();
-      }
+    if (isVisible && shouldRender) {
+      renderPrimaryTiles()
+        .then(() => {
+          // 在主要瓦片渲染完成后，开始预加载上下各两行
+          return prefetchAdjacentRows();
+        })
+        .catch(() => void 0);
     }
-  }, [isVisible, preload, shouldRender, renderNeededTiles, isLoading]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVisible, shouldRender, primaryRowStart, primaryRowEnd, primaryColStart, primaryColEnd]);
 
-  // 缩放变化时清空旧瓦片
+  // 当缩放变化时清空旧瓦片与 in-flight 标记
   useEffect(() => {
     setTiles(new Map());
+    inFlightKeysRef.current.clear();
   }, [scale]);
 
-  // 瓦片更新时重绘
+  // 当瓦片更新时重新绘制
   useEffect(() => {
     drawToCanvas();
   }, [tiles, drawToCanvas]);
 
   return (
     <div
-      ref={wrapperRef}
       style={{
         position: 'absolute',
         top: 0,
         left: 0,
         width: pageWidth,
         height: pageHeight,
-        background: isLoading ? '#f8f8f8' : 'white',
+        background: isLoadingPrimary || isLoadingPrefetch ? '#f8f8f8' : 'white',
         border: '1px solid #d0d0d0',
         borderRadius: '2px',
         boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
@@ -307,7 +287,7 @@ export const SimplePage: React.FC<SimplePageProps> = ({
         }}
       />
       
-      {isLoading && (
+      {(isLoadingPrimary || isLoadingPrefetch) && (
         <div
           style={{
             position: 'absolute',
@@ -321,7 +301,7 @@ export const SimplePage: React.FC<SimplePageProps> = ({
             fontSize: '14px',
           }}
         >
-          渲染中...
+          渲染中... {tilesX}x{tilesY} 瓦片
         </div>
       )}
 
@@ -338,7 +318,7 @@ export const SimplePage: React.FC<SimplePageProps> = ({
           fontSize: '12px',
         }}
       >
-        P{pageIndex + 1} | {tiles.size}/{tilesX * tilesY}{preload ? ' (preload)' : ''}
+        P{pageIndex + 1} | {tiles.size}/{tilesX * tilesY}
       </div>
     </div>
   );
