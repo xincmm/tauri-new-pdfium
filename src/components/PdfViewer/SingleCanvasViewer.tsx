@@ -6,6 +6,8 @@ import { calculatePageLayouts, getExpandedVisiblePages, getVisiblePages } from '
 import { PRELOAD_PAGES_AHEAD, SCROLL_DEBOUNCE_MS } from '../../types/pdf';
 import { batchTileLoader } from '../../utils/batchTileLoader';
 import { pageCompositor, type TileData } from '../../utils/pageCompositor';
+import { useRenderQueue } from './hooks/useRenderQueue';
+import { H_PADDING, SLOW_SPEED_THRESHOLD, SLOW_PREFETCH_PAGES, IDLE_ENQUEUE_LIMIT, DPR_MAX } from './config';
 
 interface PageRenderInfo {
   pageIndex: number;
@@ -29,7 +31,7 @@ function calculateTilePlan(
 
   // 简化版：对于单Canvas模式，暂时使用全页加载
   // 后续可以根据需要优化为半页/行级加载
-  const tilesToLoad = [];
+  const tilesToLoad = [] as Array<{ tx: number; ty: number }>;
   for (let tx = 0; tx < tilesX; tx++) {
     for (let ty = 0; ty < tilesY; ty++) {
       tilesToLoad.push({ tx, ty });
@@ -44,6 +46,7 @@ export const SingleCanvasViewer: React.FC = () => {
   const [viewState, setViewState] = useState({
     scale: 1.2,
     scrollY: 0,
+    scrollX: 0,
   });
   const lastScrollYRef = useRef(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -52,11 +55,22 @@ export const SingleCanvasViewer: React.FC = () => {
   const [isScrollIdle, setIsScrollIdle] = useState<boolean>(true);
   const idleTimerRef = useRef<number | null>(null);
   const [hasInteracted, setHasInteracted] = useState<boolean>(false);
+  const initialCenteredRef = useRef<boolean>(false);
+  const targetScrollRef = useRef<{ x: number | null; y: number | null }>({ x: null, y: null });
 
   // 页面渲染信息管理 - 使用 ref 避免依赖循环
   const pageRenderMapRef = useRef<Map<number, PageRenderInfo>>(new Map());
   const [renderVersion, setRenderVersion] = useState(0); // 用于触发重绘
-  const devicePixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  const devicePixelRatio = Math.min(window.devicePixelRatio || 1, DPR_MAX);
+
+  // 新增：滚动速度/方向（用于动态预加载）
+  const lastTsRef = useRef<number | null>(null);
+  const velocityEmaRef = useRef<number>(0);
+  const [scrollSpeedPxPerMs, setScrollSpeedPxPerMs] = useState<number>(0);
+  const [scrollDirection, setScrollDirection] = useState<-1 | 0 | 1>(0);
+
+  // 滚动中前向单页低并发预取保护
+  const scrollPrefetchRef = useRef<boolean>(false);
 
   // 监听容器高度变化
   useEffect(() => {
@@ -71,33 +85,72 @@ export const SingleCanvasViewer: React.FC = () => {
 
   // 计算页面布局
   const pageLayouts = useMemo(() => {
-    if (!pdfMetadata) return [];
+    if (!pdfMetadata) return [] as Array<{ pageIndex: number; y: number; width: number; height: number }>;
     return calculatePageLayouts(pdfMetadata, viewState);
   }, [pdfMetadata, viewState.scale]);
 
-  // 计算可见页面：初次打开仅渲染首屏；交互后再扩展预加载窗口
+  // 最大页宽与内容区域宽度（用于横向滚动）
+  const maxPageWidth = useMemo(() => {
+    if (!pageLayouts || pageLayouts.length === 0) return 0;
+    return Math.max(...pageLayouts.map(l => l.width));
+  }, [pageLayouts]);
+  const totalWidth = useMemo(() => (maxPageWidth > 0 ? H_PADDING * 2 + maxPageWidth : 0), [maxPageWidth]);
+
+  // 在布局变化或缩放后，如果内容宽于视口且用户未交互，则自动将水平滚动条置于居中位置
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const cw = container.clientWidth;
+    if (cw <= 0 || maxPageWidth <= 0) return;
+
+    const contentWidth = H_PADDING * 2 + maxPageWidth;
+
+    if (contentWidth > cw && !hasInteracted) {
+      const targetLeft = Math.max(0, H_PADDING + (maxPageWidth - cw) / 2);
+      // 仅当与现有位置相差较大时才设置，避免抖动
+      if (Math.abs(container.scrollLeft - targetLeft) > 1) {
+        container.scrollLeft = targetLeft;
+        setViewState(prev => ({ ...prev, scrollX: targetLeft }));
+      }
+      initialCenteredRef.current = true;
+    }
+  }, [maxPageWidth, viewState.scale]);
+
+  // 根据速度计算动态预加载窗口大小
+  const getDynamicPreloadAhead = useCallback((speedPxPerMs: number) => {
+    // 经验阈值，可在顶部集中配置
+    if (speedPxPerMs < 0.05) return 2;      // 非常慢
+    if (speedPxPerMs < 0.15) return 4;      // 慢速
+    if (speedPxPerMs < 0.3) return 6;       // 中速
+    if (speedPxPerMs < 0.6) return 8;       // 略快
+    return 10;                               // 快速/拖动
+  }, []);
+
+  // 计算可见页面：初次打开仅渲染首屏；交互后动态扩展预加载窗口
   const visibleLayouts = useMemo(() => {
-    if (!pdfMetadata) return [];
+    if (!pdfMetadata) return [] as Array<{ pageIndex: number; y: number; width: number; height: number }>;
     if (!hasInteracted) {
       const baseVisible = getVisiblePages(
         pageLayouts,
         containerHeight,
         viewState.scrollY
       );
-      if (baseVisible.length === 0) return [];
+      if (baseVisible.length === 0) return [] as typeof pageLayouts;
       const firstIdx = baseVisible[0].pageIndex;
       const lastIdx = baseVisible[baseVisible.length - 1].pageIndex;
       const endIdx = Math.min(pageLayouts.length - 1, lastIdx + 2);
       return pageLayouts.filter(l => l.pageIndex >= firstIdx && l.pageIndex <= endIdx);
     }
+
+    const dynamicAhead = getDynamicPreloadAhead(scrollSpeedPxPerMs);
     return getExpandedVisiblePages(
       pageLayouts,
       containerHeight,
       viewState.scrollY,
       lastScrollYRef.current,
-      PRELOAD_PAGES_AHEAD
+      dynamicAhead
     );
-  }, [pdfMetadata, pageLayouts, containerHeight, viewState.scrollY, hasInteracted]);
+  }, [pdfMetadata, pageLayouts, containerHeight, viewState.scrollY, hasInteracted, getDynamicPreloadAhead, scrollSpeedPxPerMs]);
 
   const totalHeight = pageLayouts.length > 0 
     ? pageLayouts[pageLayouts.length - 1].y + pageLayouts[pageLayouts.length - 1].height + 50 
@@ -195,6 +248,11 @@ export const SingleCanvasViewer: React.FC = () => {
     setRenderVersion(prev => prev + 1);
   }, [renderPageToBitmap]);
 
+  // 渲染队列（单并发、可取消）
+  const { enqueue, bumpEpoch, setEnabled } = useRenderQueue(async (idx, layout) => {
+    await updatePageRender(idx, layout);
+  });
+
   // 绘制所有可见页面到单个 Canvas
   const drawToCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -225,17 +283,23 @@ export const SingleCanvasViewer: React.FC = () => {
     // 计算视口范围（逻辑像素）
     const viewportTop = viewState.scrollY;
     const viewportBottom = viewState.scrollY + containerHeight;
+    // 当内容宽度小于视口时，内容整体居中显示
+    // 使页面在视口更自然地居中：以最大页宽为基准进行居中
+    const baseOffset = Math.max(0, (containerWidth - maxPageWidth) / 2 - H_PADDING);
 
     // 绘制所有可见页面
     for (const layout of visibleLayouts) {
       const pageTop = layout.y + 40; // 加上padding
       const pageBottom = pageTop + layout.height;
 
-      // 检查页面是否在视口内
+      // 检查页面是否在垂直视口内
       if (pageBottom < viewportTop || pageTop > viewportBottom) continue;
 
+      // 计算页面在内容区的左侧位置（逻辑像素）
+      const pageLeft = baseOffset + H_PADDING + (maxPageWidth - layout.width) / 2;
+
       // 计算页面在画布上的位置（逻辑像素）
-      const canvasX = (containerWidth - layout.width) / 2;
+      const canvasX = pageLeft - viewState.scrollX;
       const canvasY = pageTop - viewState.scrollY;
 
       const pageInfo = pageRenderMapRef.current.get(layout.pageIndex);
@@ -286,7 +350,7 @@ export const SingleCanvasViewer: React.FC = () => {
       ctx.lineWidth = 1 / dpr;
       ctx.strokeRect(canvasX, canvasY, layout.width, layout.height);
     }
-  }, [pdfMetadata, visibleLayouts, containerHeight, devicePixelRatio, viewState.scrollY]);
+  }, [pdfMetadata, visibleLayouts, containerHeight, devicePixelRatio, viewState.scrollY, viewState.scrollX, maxPageWidth]);
 
   // 管理页面渲染 - 使用稳定的key避免循环
   const visiblePagesKey = useMemo(() => {
@@ -296,18 +360,76 @@ export const SingleCanvasViewer: React.FC = () => {
   useEffect(() => {
     if (!isScrollIdle || !pdfMetadata) return;
 
-    for (const layout of visibleLayouts) {
+    // 停止滚动：允许队列运行
+    setEnabled(true);
+
+    // 以视口中心的距离作为优先级，越近优先级越高
+    const viewportCenter = viewState.scrollY + containerHeight / 2;
+    const candidates = visibleLayouts
+      .map(l => ({
+        layout: l,
+        distance: Math.abs((l.y + 40 + l.height / 2) - viewportCenter),
+      }))
+      .sort((a, b) => a.distance - b.distance);
+
+    // 限制一次加入的任务数量，避免长队列（来自配置）
+
+    let count = 0;
+    for (const { layout } of candidates) {
+      if (count >= IDLE_ENQUEUE_LIMIT) break;
       const pageInfo = pageRenderMapRef.current.get(layout.pageIndex);
       if (!pageInfo || (!pageInfo.imageBitmap && !pageInfo.isLoading)) {
-        updatePageRender(layout.pageIndex, layout);
+        // 距离越近优先级越高（转换为更小的数值）
+        const priority = count; // 0,1,2,3
+        enqueue({ pageIndex: layout.pageIndex, layout, priority });
+        count++;
       }
     }
-  }, [visiblePagesKey, isScrollIdle, pdfMetadata, updatePageRender]); // 使用稳定的key
+  }, [visiblePagesKey, isScrollIdle, pdfMetadata, enqueue, setEnabled, viewState.scrollY, containerHeight]);
+
+  // 滚动中：禁用队列并提升epoch（取消旧任务）
+  useEffect(() => {
+    if (!pdfMetadata) return;
+    if (!isScrollIdle) {
+      // 滚动时禁用队列并取消旧任务
+      setEnabled(false);
+      bumpEpoch();
+    } else {
+      // 停止滚动后，重置epoch，确保新的请求立即开始
+      bumpEpoch();
+    }
+  }, [isScrollIdle, pdfMetadata, bumpEpoch, setEnabled]);
+
+  // 滚动中前向低并发预取：慢速滚动时预取前向最多3页，按优先级排队
+  useEffect(() => {
+    if (isScrollIdle || !pdfMetadata) return;
+    if (scrollSpeedPxPerMs >= SLOW_SPEED_THRESHOLD) return; // 快速滚动：不预取
+    if (visibleLayouts.length === 0) return;
+
+    const indices = [...visibleLayouts.map(l => l.pageIndex)].sort((a, b) => a - b);
+    const first = indices[0];
+    const last = indices[indices.length - 1];
+
+    const start = scrollDirection >= 0 ? last + 1 : first - 1;
+    const step = scrollDirection >= 0 ? 1 : -1;
+
+    let priority = 5;
+    for (let i = 0; i < SLOW_PREFETCH_PAGES; i++) {
+      const idx = start + i * step;
+      if (idx < 0 || idx >= pageLayouts.length) continue;
+      const info = pageRenderMapRef.current.get(idx);
+      if (info && (info.imageBitmap || info.isLoading)) continue;
+      const layout = pageLayouts.find(l => l.pageIndex === idx);
+      if (!layout) continue;
+      enqueue({ pageIndex: idx, layout, priority });
+      priority += 1; // 5,6,7
+    }
+  }, [isScrollIdle, scrollDirection, pdfMetadata, visibleLayouts, pageLayouts, enqueue, scrollSpeedPxPerMs]);
 
   // 重绘 Canvas - 监听renderVersion变化
   useEffect(() => {
     drawToCanvas();
-  }, [drawToCanvas, renderVersion]);
+  }, [drawToCanvas, renderVersion, viewState.scrollY, containerHeight]);
 
   // 清理资源
   useEffect(() => {
@@ -343,24 +465,80 @@ export const SingleCanvasViewer: React.FC = () => {
     }
   };
 
-  // 缩放控制
+  // 缩放控制（以视口中心为锚点），并在缩放时清空队列
   const handleZoom = (delta: number) => {
     setHasInteracted(true);
+
+    // 以视口中心为锚：计算缩放前中心在内容坐标中的位置
+    const container = containerRef.current;
+    const cw = container?.clientWidth || window.innerWidth;
+    const ch = container?.clientHeight || window.innerHeight;
+    const centerX = viewState.scrollX + cw / 2;
+    const centerY = viewState.scrollY + ch / 2;
+
+    setViewState(prev => {
+      const newScale = Math.max(0.25, Math.min(4.0, prev.scale + delta));
+      const scaleRatio = newScale / prev.scale;
+
+      // 目标：缩放后保持中心锚点不动
+      const targetX = Math.max(0, centerX * scaleRatio - cw / 2);
+      const targetY = Math.max(0, centerY * scaleRatio - ch / 2);
+      targetScrollRef.current = { x: targetX, y: targetY };
+
+      return { ...prev, scale: newScale };
+    });
+
+    // 缩放时禁用并清空队列（通过提升epoch）
+    setEnabled(false);
+    bumpEpoch();
+  };
+
+  // 应用缩放后的目标滚动位置
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const { x, y } = targetScrollRef.current;
+    if (x == null && y == null) return;
+
+    if (x != null) container.scrollLeft = x;
+    if (y != null) container.scrollTop = y;
+
     setViewState(prev => ({
       ...prev,
-      scale: Math.max(0.25, Math.min(4.0, prev.scale + delta)),
+      scrollX: x != null ? x : prev.scrollX,
+      scrollY: y != null ? y : prev.scrollY,
     }));
-  };
+
+    // 应用一次后即清空目标
+    targetScrollRef.current = { x: null, y: null };
+  }, [viewState.scale]);
 
   // 滚动处理
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
     if (target) {
       setHasInteracted(true);
-      lastScrollYRef.current = viewState.scrollY;
+      // 记录上一次滚动位置
+      const prevY = viewState.scrollY;
+      lastScrollYRef.current = prevY;
+
+      const now = performance.now();
+      if (lastTsRef.current != null) {
+        const dtMs = Math.max(0.1, now - lastTsRef.current);
+        const dy = target.scrollTop - prevY;
+        const instV = Math.abs(dy) / dtMs; // px/ms
+        const alpha = 0.3; // EMA平滑系数
+        const ema = alpha * instV + (1 - alpha) * velocityEmaRef.current;
+        velocityEmaRef.current = ema;
+        setScrollSpeedPxPerMs(ema);
+        setScrollDirection(dy > 0 ? 1 : dy < 0 ? -1 : 0);
+      }
+      lastTsRef.current = now;
+
       setViewState(prev => ({
         ...prev,
         scrollY: target.scrollTop,
+        scrollX: target.scrollLeft,
       }));
       
       // 滚动时立即重绘，显示空白页占位
@@ -437,7 +615,7 @@ export const SingleCanvasViewer: React.FC = () => {
         ref={containerRef}
       >
         {/* 占位容器用于滚动 */}
-        <div style={{ height: totalHeight, position: 'relative' }}>
+        <div style={{ height: totalHeight, width: Math.max(totalWidth, containerRef.current?.clientWidth || 0), position: 'relative', margin: '0 auto' }}>
           {/* 单个 Canvas 覆盖整个可视区域 */}
           <canvas
             ref={canvasRef}
